@@ -1,3 +1,9 @@
+include(FetchContent)
+
+# Included ahead of common.cmake: FetchContent honours the first declaration of
+# a dependency, and the Wii U needs spdlog and ThreadPool patched before
+# common.cmake can declare them unpatched.
+
 #=================== nlohmann-json ===================
 find_package(nlohmann_json QUIET)
 if (NOT ${nlohmann_json_FOUND})
@@ -11,6 +17,10 @@ if (NOT ${nlohmann_json_FOUND})
 endif()
 
 #=================== spdlog ===================
+# wut has no pthreads for CMake's Threads package to find
+set(spdlog_patch_file ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/spdlog-wiiu.patch)
+set(spdlog_apply_patch_command ${CMAKE_COMMAND} -Dpatch_file=${spdlog_patch_file} -Dwith_reset=TRUE -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/git-patch.cmake)
+
 find_package(spdlog QUIET)
 if (NOT ${spdlog_FOUND})
     FetchContent_Declare(
@@ -18,9 +28,7 @@ if (NOT ${spdlog_FOUND})
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
         GIT_TAG v1.15.0
         OVERRIDE_FIND_PACKAGE
-        PATCH_COMMAND patch -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/spdlog-wiiu.patch"
-        # don't try to apply the patch multiple times https://stackoverflow.com/a/73725257
-        UPDATE_DISCONNECTED 1
+        PATCH_COMMAND ${spdlog_apply_patch_command}
     )
 
     option(SPDLOG_BUILD_EXAMPLE "" OFF)
@@ -35,14 +43,15 @@ if (NOT ${spdlog_FOUND})
 endif()
 
 #======== thread-pool ========
-# Wii U needs a patch to get rid of thread_local
+# thread_local is unavailable on this target
+set(threadpool_patch_file ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/threadpool-wiiu.patch)
+set(threadpool_apply_patch_command ${CMAKE_COMMAND} -Dpatch_file=${threadpool_patch_file} -Dwith_reset=TRUE -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/git-patch.cmake)
+
 FetchContent_Declare(
     ThreadPool
     GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
     GIT_TAG v4.1.0
-    PATCH_COMMAND patch -p2 -i "${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependencies/patches/threadpool-wiiu.patch"
-    # don't try to apply the patch multiple times https://stackoverflow.com/a/73725257
-    UPDATE_DISCONNECTED 1
+    PATCH_COMMAND ${threadpool_apply_patch_command}
 )
 FetchContent_MakeAvailable(ThreadPool)
 list(APPEND ADDITIONAL_LIB_INCLUDES ${threadpool_SOURCE_DIR}/include)

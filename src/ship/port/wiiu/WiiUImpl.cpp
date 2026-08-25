@@ -11,7 +11,8 @@
 
 #include <SDL2/SDL.h>
 
-#include "Context.h"
+#include <map>
+#include "ship/Context.h"
 
 namespace Ship {
 namespace WiiU {

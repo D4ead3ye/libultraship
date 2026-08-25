@@ -6,6 +6,7 @@
 #include <ship/port/wiiu/ImGui/imgui_impl_wiiu.h>
 #include "fast/backends/gfx_wiiu.h"
 #include "fast/backends/gfx_gx2.h"
+#include <imgui_impl_sdl2.h>
 #endif
 
 #include "fast/Fast3dWindow.h"

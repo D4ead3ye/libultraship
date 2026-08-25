@@ -16,15 +16,15 @@
 #include <gx2/surface.h>
 #include <gx2/context.h>
 
-#include "gx2_shader_gen.h"
+#include "fast/backends/gx2_shader_gen.h"
 #include <ship/port/wiiu/ImGui/imgui_impl_gx2.h>
 
 namespace Fast {
 
 struct ShaderProgram {
     struct ShaderGroup group;
-    uint8_t num_inputs;
-    bool used_textures[2];
+    uint8_t numInputs;
+    bool usedTextures[2];
     bool used_noise;
     uint32_t window_params_offset;
     int32_t samplers_location[SHADER_MAX_TEXTURES];

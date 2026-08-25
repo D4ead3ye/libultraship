@@ -7,7 +7,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <stdio.h>
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__WIIU__)
 #include <dlfcn.h>
 #endif
 
@@ -3975,9 +3975,15 @@ static bool IsValidResolvedAddress(uintptr_t addr) {
     return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                               reinterpret_cast<LPCSTR>(addr), &module) != 0;
 #else
+#ifdef __WIIU__
+    // wut has no dlfcn; treat the address as not belonging to a loaded object.
+    (void)addr;
+    return false;
+#else
     // For non-Windows platforms, check whether the address belongs to a loaded object.
     Dl_info info;
     return dladdr(reinterpret_cast<void*>(addr), &info) != 0;
+#endif
 #endif
 }
 

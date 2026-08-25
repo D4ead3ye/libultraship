@@ -1,5 +1,5 @@
---- a/threadpool-src/include/BS_thread_pool.hpp
-+++ b/threadpool-src/include/BS_thread_pool.hpp
+--- a/include/BS_thread_pool.hpp
++++ b/include/BS_thread_pool.hpp
 @@ -37,6 +37,9 @@
  #include <type_traits>        // std::conditional_t, std::decay_t, std::invoke_result_t, std::is_void_v, std::remove_const_t (if priority enabled)
  #include <utility>            // std::forward, std::move

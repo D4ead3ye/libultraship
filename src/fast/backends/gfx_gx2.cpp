@@ -4,7 +4,7 @@
 */
 #ifdef __WIIU__
 
-#include "window/Window.h"
+#include "ship/window/Window.h"
 #include "fast/Fast3dWindow.h"
 
 #include <stdint.h>
@@ -18,12 +18,11 @@
 #define _LANGUAGE_C
 #endif
 #include "libultraship/libultra/gbi.h"
-#include <public/bridge/consolevariablebridge.h>
+#include <libultraship/bridge/consolevariablebridge.h>
 
-#include "public/bridge/gfx_cc.h"
-#include "gfx_rendering_api.h"
-#include "gfx_gx2.h"
-#include "gfx_wiiu.h"
+#include "fast/backends/gfx_rendering_api.h"
+#include "fast/backends/gfx_gx2.h"
+#include "fast/backends/gfx_wiiu.h"
 #include "fast/interpreter.h"
 
 #include <gx2/texture.h>
@@ -36,7 +35,7 @@
 #include <gx2/mem.h>
 #include <gx2/registers.h>
 #include <gx2/display.h>
-#include "gx2_shader_gen.h"
+#include "fast/backends/gx2_shader_gen.h"
 #include "gx2_util.h"
 
 #include <proc_ui/procui.h>
@@ -48,7 +47,7 @@ namespace Fast {
 
 #define ALIGN(x, align) (((x) + ((align)-1)) & ~((align)-1))
 
-struct Texture {
+struct GX2TextureObj {
     GX2Texture texture;
     bool texture_uploaded;
 
@@ -80,7 +79,7 @@ static GX2DepthBuffer depthReadBuffer;
 static std::map<std::pair<uint64_t, uint64_t>, struct ShaderProgram> shader_program_pool;
 static struct ShaderProgram* current_shader_program;
 
-static struct Texture* current_texture;
+static struct GX2TextureObj* current_texture;
 static int current_tile;
 
 // 96 Mb (should be more than enough to draw everything without waiting for the GPU)
@@ -204,9 +203,9 @@ struct ShaderProgram* GfxRenderingAPIGX2::CreateAndLoadNewShader(uint64_t shader
         return nullptr;
     }
 
-    prg->num_inputs = cc_features.num_inputs;
-    prg->used_textures[0] = cc_features.used_textures[0];
-    prg->used_textures[1] = cc_features.used_textures[1];
+    prg->numInputs = cc_features.numInputs;
+    prg->usedTextures[0] = cc_features.usedTextures[0];
+    prg->usedTextures[1] = cc_features.usedTextures[1];
 
     LoadShader(prg);
 
@@ -231,13 +230,13 @@ struct ShaderProgram* GfxRenderingAPIGX2::LookupShader(uint64_t shader_id0, uint
 }
 
 void GfxRenderingAPIGX2::ShaderGetInfo(struct ShaderProgram* prg, uint8_t* num_inputs, bool used_textures[2]) {
-    *num_inputs = prg->num_inputs;
-    used_textures[0] = prg->used_textures[0];
-    used_textures[1] = prg->used_textures[1];
+    *num_inputs = prg->numInputs;
+    used_textures[0] = prg->usedTextures[0];
+    used_textures[1] = prg->usedTextures[1];
 }
 
 uint32_t GfxRenderingAPIGX2::NewTexture(void) {
-    struct Texture* tex = (struct Texture*)calloc(1, sizeof(struct Texture));
+    struct GX2TextureObj* tex = (struct GX2TextureObj*)calloc(1, sizeof(struct GX2TextureObj));
 
     tex->imtex.Texture = &tex->texture;
     tex->imtex.Sampler = &tex->sampler;
@@ -247,7 +246,7 @@ uint32_t GfxRenderingAPIGX2::NewTexture(void) {
 }
 
 void GfxRenderingAPIGX2::DeleteTexture(uint32_t texture_id) {
-    struct Texture* tex = (struct Texture*)texture_id;
+    struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
 
     if (tex->texture.surface.image) {
         free(tex->texture.surface.image);
@@ -257,7 +256,7 @@ void GfxRenderingAPIGX2::DeleteTexture(uint32_t texture_id) {
 }
 
 void GfxRenderingAPIGX2::SelectTexture(int tile, uint32_t texture_id) {
-    struct Texture* tex = (struct Texture*)texture_id;
+    struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
     current_texture = tex;
     current_tile = tile;
 
@@ -276,7 +275,7 @@ void GfxRenderingAPIGX2::SelectTexture(int tile, uint32_t texture_id) {
 }
 
 void GfxRenderingAPIGX2::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
-    struct Texture* tex = current_texture;
+    struct GX2TextureObj* tex = current_texture;
     assert(tex);
 
     if ((tex->texture.surface.width != width) || (tex->texture.surface.height != height) ||
@@ -341,7 +340,7 @@ static GX2TexClampMode gfx_cm_to_gx2(uint32_t val) {
 }
 
 void GfxRenderingAPIGX2::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
-    struct Texture* tex = current_texture;
+    struct GX2TextureObj* tex = current_texture;
     assert(tex);
 
     current_tile = tile;
@@ -888,7 +887,7 @@ FilteringMode GfxRenderingAPIGX2::GetTextureFilter(void) {
 }
 
 ImGui_ImplGX2_Texture* gfx_gx2_texture_for_imgui(uint32_t texture_id) {
-    struct Texture* tex = (struct Texture*)texture_id;
+    struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
     return &tex->imtex;
 }
 
@@ -911,7 +910,7 @@ void GfxRenderingAPIGX2::SetCurrentPrimDepth(float depth) {
 }
 
 ImTextureID GfxRenderingAPIGX2::GetTextureById(int id) {
-    struct Texture* tex = (struct Texture*)id;
+    struct GX2TextureObj* tex = (struct GX2TextureObj*)id;
     return (ImTextureID)&tex->imtex;
 }
 

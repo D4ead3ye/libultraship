@@ -90,10 +90,22 @@ static void ImGui_ImplWiiU_AppearKeyboardInput()
     ImGuiInputTextState* state = ImGui::GetInputTextState(ImGui::GetActiveID());
     if (state)
     {
-        if (!(state->Flags & ImGuiInputTextFlags_AlwaysOverwrite))
-            bd->AppearArg.inputFormArg.initialText = (char16_t*) state->TextW.Data;
+        // ImGui 1.91 dropped the UTF-16 mirror of the input buffer (TextW) and
+        // went UTF-8 only, but swkbd still wants UTF-16, so convert here. The
+        // buffer is static because swkbd reads it after this function returns.
+        static ImVector<ImWchar> initialTextUtf16;
+        IM_STATIC_ASSERT(sizeof(ImWchar) == sizeof(char16_t));
 
-        bd->AppearArg.inputFormArg.maxTextLength = state->BufCapacityA;
+        if (!(state->Flags & ImGuiInputTextFlags_AlwaysOverwrite))
+        {
+            const char* textUtf8 = state->TextA.Data ? state->TextA.Data : "";
+            const int charCount = ImTextCountCharsFromUtf8(textUtf8, NULL) + 1;
+            initialTextUtf16.resize(charCount);
+            ImTextStrFromUtf8(initialTextUtf16.Data, charCount, textUtf8, NULL);
+            bd->AppearArg.inputFormArg.initialText = (char16_t*) initialTextUtf16.Data;
+        }
+
+        bd->AppearArg.inputFormArg.maxTextLength = state->BufCapacity;
         bd->AppearArg.inputFormArg.higlightInitialText = !!(state->Flags & ImGuiInputTextFlags_AutoSelectAll);
 
         if (state->Flags & ImGuiInputTextFlags_Password)

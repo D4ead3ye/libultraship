@@ -27,11 +27,14 @@ target_sources(ImGui
     ${imgui_SOURCE_DIR}/imgui.cpp
 )
 
-target_sources(ImGui
-    PRIVATE
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp
-)
+# The Wii U renders ImGui through its own GX2 backend in src/ship/port/wiiu,
+# but still builds the SDL2 backend: wut has SDL2, and the shared Fast3dGui
+# code paths reference it unconditionally.
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+    target_sources(ImGui PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+endif()
+
+target_sources(ImGui PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl2.cpp)
 
 target_include_directories(ImGui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends PRIVATE ${SDL2_INCLUDE_DIRS})
 
@@ -52,7 +55,18 @@ endif()
 
 #=================== STB ===================
 set(STB_DIR ${CMAKE_BINARY_DIR}/_deps/stb)
-file(DOWNLOAD "https://github.com/nothings/stb/raw/0bc88af4de5fb022db643c2d8e549a0927749354/stb_image.h" "${STB_DIR}/stb_image.h")
+if(EXISTS "${STB_DIR}/stb_image.h")
+    file(SIZE "${STB_DIR}/stb_image.h" stb_image_size)
+else()
+    set(stb_image_size 0)
+endif()
+if(stb_image_size LESS 1000)
+    file(DOWNLOAD "https://github.com/nothings/stb/raw/0bc88af4de5fb022db643c2d8e549a0927749354/stb_image.h" "${STB_DIR}/stb_image.h" STATUS stb_dl_status)
+    list(GET stb_dl_status 0 stb_dl_code)
+    if(NOT stb_dl_code EQUAL 0)
+        message(FATAL_ERROR "Failed to download stb_image.h: ${stb_dl_status}")
+    endif()
+endif()
 file(WRITE "${STB_DIR}/stb_impl.c" "#define STB_IMAGE_IMPLEMENTATION\n#include \"stb_image.h\"")
 
 add_library(stb STATIC)

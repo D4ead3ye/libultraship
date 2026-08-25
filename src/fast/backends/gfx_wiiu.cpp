@@ -22,6 +22,9 @@
 
 #include <whb/proc.h>
 #include "ship/window/Window.h"
+#include "ship/Context.h"
+#include "fast/Fast3dGui.h"
+#include "fast/WindowEvent.h"
 #include <proc_ui/procui.h>
 #include <proc_ui/memory.h>
 
@@ -32,11 +35,10 @@
 #define _LANGUAGE_C
 #endif
 
-#include "gfx_wiiu.h"
-#include "gfx_gx2.h"
-#include "gfx_pc.h"
-#include "gfx_gx2.h"
-#include "gfx_wiiu.h"
+#include "fast/backends/gfx_wiiu.h"
+#include "fast/backends/gfx_gx2.h"
+#include "fast/backends/gfx_gx2.h"
+#include "fast/backends/gfx_wiiu.h"
 
 #include <ship/port/wiiu/ImGui/imgui_impl_wiiu.h>
 #include "ship/port/wiiu/WiiUImpl.h"
@@ -303,13 +305,13 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
 
     GX2SetSwapInterval(frame_divisor);
 
-    gfx_current_dimensions.width = gfx_current_game_window_viewport.width = WIIU_DEFAULT_FB_WIDTH;
-    gfx_current_dimensions.height = gfx_current_game_window_viewport.height = WIIU_DEFAULT_FB_HEIGHT;
-
-    Ship::GuiWindowInitData window_impl;
+    GuiWindowInitData window_impl;
     window_impl.Gx2.Width = WIIU_DEFAULT_FB_WIDTH;
     window_impl.Gx2.Height = WIIU_DEFAULT_FB_HEIGHT;
-    Ship::Context::GetInstance()->GetWindow()->GetGui()->Init(window_impl);
+    window_impl.Backend = WindowBackend::FAST3D_WIIU_GX2;
+
+    std::dynamic_pointer_cast<Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())
+        ->Init(window_impl);
 }
 
 static void gfx_wiiu_shutdown(void) {
@@ -410,9 +412,12 @@ void GfxWindowBackendWiiU::HandleEvents(void) {
         }
     }
 
-    Ship::WindowEvent event_impl;
+    WindowEvent event_impl;
     event_impl.Gx2.Input = &input;
-    Ship::Context::GetInstance()->GetWindow()->GetGui()->HandleWindowEvents(event_impl);
+    auto fast3dGui = std::dynamic_pointer_cast<Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui());
+    if (fast3dGui) {
+        fast3dGui->HandleWindowEvents(event_impl);
+    }
 }
 
 bool GfxWindowBackendWiiU::IsFrameReady(void) {

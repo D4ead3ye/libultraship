@@ -4,7 +4,9 @@
 */
 #ifdef __WIIU__
 
-#include "gx2_shader_gen.h"
+#include "fast/interpreter.h"
+#include "fast/backends/gx2_shader_gen.h"
+
 #include "gx2_shader_inl.h"
 
 #include <malloc.h>
@@ -51,7 +53,7 @@ static inline int reg_table_find_free(struct RegTable* tbl, bool reuse_texinfo) 
     return -1;
 }
 
-static void reg_table_build(struct RegTable* tbl, struct CCFeatures *cc_features, bool needs_noise) {
+static void reg_table_build(struct RegTable* tbl, CCFeatures *cc_features, bool needs_noise) {
     tbl->used = 0;
     memset(tbl->regs, REG_TABLE_UNUSED, 128);
 
@@ -72,18 +74,18 @@ static void reg_table_build(struct RegTable* tbl, struct CCFeatures *cc_features
         tbl->regs[GRAYSCALE_REG] = REG_TABLE_RESERVED;
     }
 
-    for (int i = 0; i < cc_features->num_inputs; i++) {
+    for (int i = 0; i < cc_features->numInputs; i++) {
         tbl->regs[5 + i] = SHADER_INPUT_1 + i;
     }
 
     // for the rest of regs we find unused ones
-    if (cc_features->used_textures[0]) {
+    if (cc_features->usedTextures[0]) {
         int reg = reg_table_find_free(tbl, false);
         assert(reg != -1);
         tbl->regs[reg] = SHADER_TEXEL0;
     }
 
-    if (cc_features->used_textures[1]) {
+    if (cc_features->usedTextures[1]) {
         int reg = reg_table_find_free(tbl, false);
         assert(reg != -1);
         tbl->regs[reg] = SHADER_TEXEL1;
@@ -330,7 +332,7 @@ static void append_tex_clamp(struct RegTable* tbl, uint64_t **alu_ptr, uint8_t t
     }
 }
 
-static void append_formula(struct RegTable* tbl, uint64_t **alu_ptr, uint8_t c[2][4], bool do_single, bool do_multiply, bool do_mix, bool only_alpha) {
+static void append_formula(struct RegTable* tbl, uint64_t **alu_ptr, int c[2][4], bool do_single, bool do_multiply, bool do_mix, bool only_alpha) {
     if (do_single) {
         add_mov(tbl, alu_ptr, c[only_alpha][3], only_alpha);
     } else if (do_multiply) {
@@ -447,9 +449,9 @@ static GX2SamplerVar samplerVars[] = {
     cur_buf += sizeof(tmp) / sizeof(uint64_t); \
     } while (0)
 
-static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_features) {
+static int generatePixelShader(GX2PixelShader *psh, CCFeatures *cc_features) {
     static const size_t max_program_buf_size = 512 * sizeof(uint64_t);
-    uint64_t *program_buf = memalign(GX2_SHADER_PROGRAM_ALIGNMENT, max_program_buf_size);
+    uint64_t *program_buf = (uint64_t*)memalign(GX2_SHADER_PROGRAM_ALIGNMENT, max_program_buf_size);
     if (!program_buf) {
         return -1;
     }
@@ -463,7 +465,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
     // check if we need to clamp
     bool texclamp[2] = { false, false };
     for (int i = 0; i < 2; i++) {
-        if (cc_features->used_textures[i]) {
+        if (cc_features->usedTextures[i]) {
             if (cc_features->clamp[i][0] || cc_features->clamp[i][1]) {
                 texclamp[i] = true;
             }
@@ -498,7 +500,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
         cur_buf = program_buf + texclamp_alu_offset;
 
         for (int i = 0; i < 2; i++) {
-            if (cc_features->used_textures[i] && texclamp[i]) {
+            if (cc_features->usedTextures[i] && texclamp[i]) {
                 append_tex_clamp(&reg_table, &cur_buf, i, cc_features->clamp[i][0], cc_features->clamp[i][1]);
             }
         }
@@ -512,7 +514,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
     cur_buf = program_buf + main_alu0_offset;
 
     for (int i = 0; i < 2; i++) {
-        if (cc_features->used_textures[i] && cc_features->used_masks[i]) {
+        if (cc_features->usedTextures[i] && cc_features->used_masks[i]) {
             uint8_t dst_reg = get_reg(&reg_table, (i == 0) ? SHADER_TEXEL0 : SHADER_TEXEL1);
             uint8_t mask_reg = get_reg(&reg_table, (i == 0) ? SHADER_MASKTEX0 : SHADER_MASKTEX1);
             uint8_t blend_reg;
@@ -670,7 +672,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
     uint32_t cur_tex_offset = texinfo_offset;
 
     for (int i = 0; i < 2; i++) {
-        if (cc_features->used_textures[i]) {
+        if (cc_features->usedTextures[i]) {
             if (texclamp[i]) {
                 uint8_t dst_reg = get_reg(&reg_table, (i == 0) ? SHADER_TEXINFO0 : SHADER_TEXINFO1);
                 int32_t loc = SHADER_FIRST_TEXTURE + i;
@@ -688,7 +690,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
     uint32_t texsample_offset = cur_tex_offset;
 
     for (int i = 0; i < 2; i++) {
-        if (cc_features->used_textures[i]) {
+        if (cc_features->usedTextures[i]) {
             uint8_t texcoord_reg = (i == 0) ? _R1 : _R2;
 
             // we need to sample these first or we override texcoords
@@ -764,7 +766,7 @@ static int generatePixelShader(GX2PixelShader *psh, struct CCFeatures *cc_featur
     }
 
     // regs
-    const uint32_t num_ps_inputs = 4 + cc_features->num_inputs;
+    const uint32_t num_ps_inputs = 4 + cc_features->numInputs;
 
     psh->regs.sq_pgm_resources_ps = reg_table.used; // num_gprs
     psh->regs.sq_pgm_exports_ps = 2; // export_mode
@@ -820,15 +822,15 @@ static GX2AttribVar attribVars[] = {
     { "aInput7",         GX2_SHADER_VAR_TYPE_FLOAT4, 0, 11 },
 };
 
-static int generateVertexShader(GX2VertexShader *vsh, struct CCFeatures *cc_features) {
+static int generateVertexShader(GX2VertexShader *vsh, CCFeatures *cc_features) {
     static const size_t max_program_buf_size = 16 * sizeof(uint64_t);
-    uint64_t *program_buf = memalign(GX2_SHADER_PROGRAM_ALIGNMENT, max_program_buf_size);
+    uint64_t *program_buf = (uint64_t*)memalign(GX2_SHADER_PROGRAM_ALIGNMENT, max_program_buf_size);
     if (!program_buf) {
         return -1;
     }
 
-    const uint32_t num_vs_inputs = 5 + cc_features->num_inputs;
-    const uint32_t num_ps_inputs = 4 + cc_features->num_inputs;
+    const uint32_t num_vs_inputs = 5 + cc_features->numInputs;
+    const uint32_t num_ps_inputs = 4 + cc_features->numInputs;
 
     uint64_t *cur_buf = program_buf;
 
@@ -881,7 +883,7 @@ static int generateVertexShader(GX2VertexShader *vsh, struct CCFeatures *cc_feat
     // aGrayscaleColor
     vsh->regs.sq_vtx_semantic[4] = 4;
     // aInput 1 - 7
-    for (int i = 0; i < cc_features->num_inputs; i++) {
+    for (int i = 0; i < cc_features->numInputs; i++) {
         vsh->regs.sq_vtx_semantic[5 + i] = 5 + i;
     }
 
@@ -902,7 +904,7 @@ static int generateVertexShader(GX2VertexShader *vsh, struct CCFeatures *cc_feat
 }
 #undef ADD_INSTR
 
-int gx2GenerateShaderGroup(struct ShaderGroup *group, struct CCFeatures *cc_features) {
+int gx2GenerateShaderGroup(struct ShaderGroup *group, CCFeatures *cc_features) {
     memset(group, 0, sizeof(struct ShaderGroup));
 
     // generate the pixel shader
@@ -925,7 +927,7 @@ int gx2GenerateShaderGroup(struct ShaderGroup *group, struct CCFeatures *cc_feat
     attribOffset += 4 * sizeof(float);
 
     for (int i = 0; i < 2; i++) {
-        if (cc_features->used_textures[i]) {
+        if (cc_features->usedTextures[i]) {
             // aTexCoordX
             group->attributes[group->numAttributes++] = 
                 (GX2AttribStream) { 1 + i, 0, attribOffset, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT };
@@ -948,7 +950,7 @@ int gx2GenerateShaderGroup(struct ShaderGroup *group, struct CCFeatures *cc_feat
     }
 
     // aInput
-    for (int i = 0; i < cc_features->num_inputs; i++) {
+    for (int i = 0; i < cc_features->numInputs; i++) {
         group->attributes[group->numAttributes++] = 
             (GX2AttribStream) { 5 + i, 0, attribOffset, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT };
         attribOffset += 4 * sizeof(float);
@@ -964,7 +966,7 @@ int gx2GenerateShaderGroup(struct ShaderGroup *group, struct CCFeatures *cc_feat
         return -1;
     }
 
-    GX2InitFetchShaderEx(&group->fetchShader, group->fetchShader.program, group->numAttributes, group->attributes, GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
+    GX2InitFetchShaderEx(&group->fetchShader, (uint8_t*)group->fetchShader.program, group->numAttributes, group->attributes, GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
 
     // invalidate all programs
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, group->vertexShader.program, group->vertexShader.size);
