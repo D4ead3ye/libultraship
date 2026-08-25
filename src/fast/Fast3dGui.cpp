@@ -1,5 +1,13 @@
 #include "fast/Fast3dGui.h"
 
+#ifdef __WIIU__
+#include <gx2/registers.h> // GX2SetViewport / GX2SetScissor
+#include <ship/port/wiiu/ImGui/imgui_impl_gx2.h>
+#include <ship/port/wiiu/ImGui/imgui_impl_wiiu.h>
+#include "fast/backends/gfx_wiiu.h"
+#include "fast/backends/gfx_gx2.h"
+#endif
+
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
 #include "ship/config/ConsoleVariable.h"
@@ -139,6 +147,14 @@ void Fast3dGui::ImGuiWMShutdown() {
 }
 
 void Fast3dGui::ImGuiBackendInit() {
+#ifdef __WIIU__
+    if (mImpl.Backend == WindowBackend::FAST3D_WIIU_GX2) {
+        ImGui_ImplGX2_Init();
+        ImGui_ImplWiiU_Init();
+        return;
+    }
+#endif
+
     auto window = Ship::Context::GetRawInstance()->GetWindow();
     mInterpreter = std::dynamic_pointer_cast<Fast3dWindow>(window)->GetInterpreterWeak();
     switch (mImpl.Backend) {
@@ -197,6 +213,14 @@ void Fast3dGui::ImGuiBackendShutdown() {
 
 void Fast3dGui::ImGuiBackendNewFrame() {
     switch (mImpl.Backend) {
+#ifdef __WIIU__
+        case WindowBackend::FAST3D_WIIU_GX2:
+            // GX2 has no SDL frame pacing to borrow a delta from
+            ImGui::GetIO().DeltaTime = (float)frametime / 1000.0f / 1000.0f;
+            ImGui_ImplGX2_NewFrame();
+            break;
+#endif
+
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplOpenGL3_NewFrame();
@@ -249,6 +273,19 @@ void Fast3dGui::RefreshImGuiGamepads() {
 
 void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
     switch (mImpl.Backend) {
+#ifdef __WIIU__
+        case WindowBackend::FAST3D_WIIU_GX2: {
+            ImGui_ImplGX2_RenderDrawData(data);
+
+            // Reset viewport and scissor for drawing the keyboard
+            ImGuiIO& io = ImGui::GetIO();
+            GX2SetViewport(0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y, 0.0f, 1.0f);
+            GX2SetScissor(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+            ImGui_ImplWiiU_DrawKeyboardOverlay();
+            break;
+        }
+#endif
+
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             ImGui_ImplOpenGL3_RenderDrawData(data);

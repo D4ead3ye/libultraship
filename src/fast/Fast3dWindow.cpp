@@ -8,6 +8,10 @@
 #include "fast/backends/gfx_sdl.h"
 #include "fast/backends/gfx_dxgi.h"
 #include "fast/backends/gfx_opengl.h"
+#ifdef __WIIU__
+#include "fast/backends/gfx_gx2.h"
+#include "fast/backends/gfx_wiiu.h"
+#endif
 #include "fast/backends/gfx_metal.h"
 #include "fast/backends/gfx_direct3d_common.h"
 #include "fast/backends/gfx_direct3d11.h"
@@ -36,7 +40,11 @@ Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui, std::shared_ptr<FastM
         AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_METAL);
     }
 #endif
+#ifdef __WIIU__
+    AddAvailableWindowBackend(WindowBackend::FAST3D_WIIU_GX2);
+#else
     AddAvailableWindowBackend(WindowBackend::FAST3D_SDL_OPENGL);
+#endif
 }
 
 Fast3dWindow::Fast3dWindow(std::shared_ptr<Ship::Gui> gui)
@@ -144,6 +152,12 @@ void Fast3dWindow::InitWindowManager() {
             break;
 #endif
 #ifdef ENABLE_OPENGL
+#ifdef __WIIU__
+        case WindowBackend::FAST3D_WIIU_GX2:
+            mRenderingApi = new GfxRenderingAPIGX2();
+            mWindowManagerApi = new GfxWindowBackendWiiU();
+            break;
+#endif
         case WindowBackend::FAST3D_SDL_OPENGL:
             mRenderingApi = new GfxRenderingAPIOGL();
             mWindowManagerApi = new GfxWindowBackendSDL2();

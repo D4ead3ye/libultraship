@@ -34,4 +34,7 @@
 #ifdef __APPLE__
 #include "ship/utils/AppleFolderManager.h"
 #endif
+#ifdef __WIIU__
+#include "ship/port/wiiu/WiiUImpl.h"
+#endif
 #endif

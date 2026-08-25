@@ -46,6 +46,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     include(cmake/dependencies/windows-vcpkg.cmake)
 endif()
 
+# Must precede common.cmake: FetchContent uses the first declaration of a
+# dependency, and the Wii U needs patched spdlog/ThreadPool (no TLS, no
+# thread_local) that common.cmake would otherwise declare unpatched.
+if (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+    include(cmake/dependencies/wiiu.cmake)
+endif()
+
 include(cmake/dependencies/common.cmake)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")

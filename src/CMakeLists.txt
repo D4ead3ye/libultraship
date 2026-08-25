@@ -201,6 +201,20 @@ if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
             XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
         )
     endif()
+elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+    target_compile_definitions(libultraship PRIVATE
+        ENABLE_GX2
+        $<$<CONFIG:Debug>:_DEBUG>
+        $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
+        SPDLOG_ACTIVE_LEVEL=${SPDLOG_MIN_CUTOFF}
+        SPDLOG_NO_TLS
+        SPDLOG_NO_THREAD_ID
+        STBI_NO_THREAD_LOCALS
+    )
+
+    file(GLOB_RECURSE Source_Files__Port__WiiU RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "ship/port/wiiu/*.cpp")
+    source_group("port/wiiu" FILES ${Source_Files__Port__WiiU})
+    target_sources(libultraship PRIVATE ${Source_Files__Port__WiiU})
 else()
     target_compile_definitions(libultraship PRIVATE
         ENABLE_OPENGL
