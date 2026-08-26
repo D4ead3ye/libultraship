@@ -124,6 +124,9 @@ static uint32_t sTriCulled = 0;  // backface culling
 static uint32_t sTriRect = 0;    // came in as a rect (sprite)
 static uint32_t sVtxLoaded = 0;  // vertices transformed
 static uint32_t sVtxRejAll = 0;  // transformed vertices with a clip_rej set
+static uint32_t sCmds = 0;       // display list commands executed
+static uint32_t sVtxCmds = 0;    // G_VTX commands
+static uint32_t sDlCmds = 0;     // nested display list calls
 #endif
 
 Interpreter::Interpreter() {
@@ -1591,6 +1594,9 @@ void Interpreter::AdjustWidthHeightForScale(uint32_t& width, uint32_t& height, u
 }
 
 void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
+#ifdef __WIIU__
+    sVtxCmds++;
+#endif
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const F3DVtx_t* v = &vertices[i].v;
         const F3DVtx_tn* vn = &vertices[i].n;
@@ -4908,6 +4914,9 @@ static void gfx_step() {
     auto& cmd = g_exec_stack.currCmd();
     auto cmd0 = cmd;
     int8_t opcode = (int8_t)(cmd->words.w0 >> 24);
+#ifdef __WIIU__
+    sCmds++;
+#endif
 
 #ifdef USE_GBI_TRACE
     if (cmd->words.trace.valid &&
@@ -5084,11 +5093,12 @@ void Interpreter::StartFrame() {
     {
         static uint32_t frames = 0;
         if ((frames % 60) == 0) {
-            WHBLogPrintf("[f3d] tris in=%u rect=%u clipped=%u culled=%u | vtx=%u rej=%u", sTriIn, sTriRect,
-                         sTriClipped, sTriCulled, sVtxLoaded, sVtxRejAll);
+            WHBLogPrintf("[f3d] tris in=%u rect=%u clipped=%u culled=%u | vtx=%u rej=%u | cmds=%u vtxcmd=%u",
+                         sTriIn, sTriRect, sTriClipped, sTriCulled, sVtxLoaded, sVtxRejAll, sCmds, sVtxCmds);
         }
         frames++;
         sTriIn = sTriRect = sTriClipped = sTriCulled = sVtxLoaded = sVtxRejAll = 0;
+        sCmds = sVtxCmds = sDlCmds = 0;
     }
 #endif
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
