@@ -471,6 +471,11 @@ void GfxWindowBackendWiiU::SwapBuffersBegin(void) {
 }
 
 void GfxWindowBackendWiiU::SwapBuffersEnd(void) {
+    static uint32_t swapCount = 0;
+    if (swapCount < 3 || swapCount == 60 || swapCount == 300) {
+        WHBLogPrintf("[gfx_wiiu] swap %u", swapCount);
+    }
+    swapCount++;
     static OSTick tick = 0;
     frametime = OSTicksToMicroseconds(OSGetSystemTick() - tick);
     tick = OSGetSystemTick();
