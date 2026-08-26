@@ -823,8 +823,8 @@ void GfxRenderingAPIGX2::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
     free(surface.image);
 }
 
-static std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
-GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) {
+std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
+GfxRenderingAPIGX2::GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) {
     Framebuffer& buffer = framebuffers[fb_id];
 
     std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff> res;

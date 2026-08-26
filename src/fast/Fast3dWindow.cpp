@@ -1,4 +1,8 @@
 #include "fast/Fast3dWindow.h"
+#ifdef __WIIU__
+#include <whb/log.h>
+#include <whb/log_console.h>
+#endif
 
 #include "ship/Context.h"
 #include "ship/config/Config.h"
@@ -151,13 +155,13 @@ void Fast3dWindow::InitWindowManager() {
             mRenderingApi = new GfxRenderingAPIDX11(static_cast<GfxWindowBackendDXGI*>(mWindowManagerApi));
             break;
 #endif
-#ifdef ENABLE_OPENGL
-#ifdef __WIIU__
+#ifdef ENABLE_GX2
         case WindowBackend::FAST3D_WIIU_GX2:
             mRenderingApi = new GfxRenderingAPIGX2();
             mWindowManagerApi = new GfxWindowBackendWiiU();
             break;
 #endif
+#ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             mRenderingApi = new GfxRenderingAPIOGL();
             mWindowManagerApi = new GfxWindowBackendSDL2();
@@ -171,6 +175,10 @@ void Fast3dWindow::InitWindowManager() {
 #endif
         default:
             SPDLOG_ERROR("Could not load the correct rendering backend");
+#ifdef __WIIU__
+            WHBLogPrintf("[fast3d] NO BACKEND for id %d - about to crash", GetWindowBackend());
+            WHBLogConsoleDraw();
+#endif
             break;
     }
 }
