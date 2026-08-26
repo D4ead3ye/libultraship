@@ -212,7 +212,7 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
         STBI_NO_THREAD_LOCALS
     )
 
-    file(GLOB_RECURSE Source_Files__Port__WiiU RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "ship/port/wiiu/*.cpp")
+    file(GLOB_RECURSE Source_Files__Port__WiiU RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "ship/port/wiiu/*.cpp" "ship/port/wiiu/*.c")
     source_group("port/wiiu" FILES ${Source_Files__Port__WiiU})
     target_sources(libultraship PRIVATE ${Source_Files__Port__WiiU})
 else()

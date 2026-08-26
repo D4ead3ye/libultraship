@@ -77,6 +77,9 @@ target_sources(stb PRIVATE
 )
 
 target_include_directories(stb PUBLIC ${STB_DIR})
+if (CMAKE_SYSTEM_NAME STREQUAL "CafeOS")
+    target_compile_definitions(stb PUBLIC STBI_NO_THREAD_LOCALS)
+endif()
 list(APPEND ADDITIONAL_LIB_INCLUDES ${STB_DIR})
 
 #=================== libgfxd ===================

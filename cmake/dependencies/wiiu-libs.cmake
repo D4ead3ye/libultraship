@@ -8,3 +8,6 @@ set(ADDITIONAL_LIB_INCLUDES ${ADDITIONAL_LIB_INCLUDES}
     ${DEVKITPRO}/portlibs/ppc/include
     PARENT_SCOPE
 )
+
+# wut has no execvp, and ImGui's default "open in shell" implementation calls it
+target_compile_definitions(ImGui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
