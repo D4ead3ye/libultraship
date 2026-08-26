@@ -28,8 +28,8 @@ static bool hasKpad[4] = { false };
 static KPADError kpadError[4] = { KPAD_ERROR_OK };
 static KPADStatus kpadStatus[4];
 
-#ifdef _DEBUG
 extern "C" {
+#ifdef _DEBUG
 void __wrap_abort() {
     printf("Abort called.\n");
     // force a stack trace
@@ -37,6 +37,8 @@ void __wrap_abort() {
     while (1)
         ;
 }
+
+#endif
 
 static ssize_t wiiu_log_write(struct _reent* r, void* fd, const char* ptr, size_t len) {
     char buf[1024];
@@ -51,16 +53,15 @@ static const devoptab_t dotab_stdout = {
     .write_r = wiiu_log_write,
 };
 };
-#endif
 
 void Init(const std::string& shortName) {
-#ifdef _DEBUG
+    // Not debug-only: without a device behind stdout, the first printf or
+    // spdlog write in a Release build calls through a null write_r and jumps
+    // into nothing. Point it at UDP logging instead.
     WHBLogUdpInit();
-    WHBLogPrint("Hello World!");
 
     devoptab_list[STD_OUT] = &dotab_stdout;
     devoptab_list[STD_ERR] = &dotab_stdout;
-#endif
 
     // make sure the required folders exist
     mkdir("/vol/external01/wiiu/", 0755);
