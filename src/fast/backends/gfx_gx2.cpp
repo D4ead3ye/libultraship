@@ -81,6 +81,11 @@ static std::map<std::pair<uint64_t, uint64_t>, struct ShaderProgram> shader_prog
 static struct ShaderProgram* current_shader_program;
 
 static struct GX2TextureObj* current_texture;
+// Per-tile, because a texture binding is only valid for the shader that was
+// current when it was made. Fast3D re-selects a texture only when the texture
+// changes, so a draw that switches shader while keeping the same texture would
+// otherwise leave it bound to the previous shader's sampler slot.
+static struct GX2TextureObj* current_textures[SHADER_MAX_TEXTURES];
 static int current_tile;
 
 // 96 Mb (should be more than enough to draw everything without waiting for the GPU)
@@ -181,6 +186,25 @@ void GfxRenderingAPIGX2::UnloadShader(struct ShaderProgram* old_prg) {
     current_shader_program = nullptr;
 }
 
+static void gfx_gx2_bind_textures(struct ShaderProgram* prg) {
+    if (prg == nullptr) {
+        return;
+    }
+    for (int tile = 0; tile < SHADER_MAX_TEXTURES; tile++) {
+        struct GX2TextureObj* tex = current_textures[tile];
+        const int32_t location = prg->samplers_location[tile];
+        if (tex == nullptr || location == -1) {
+            continue;
+        }
+        if (tex->texture_uploaded) {
+            GX2SetPixelTexture(&tex->texture, location);
+        }
+        if (tex->sampler_set) {
+            GX2SetPixelSampler(&tex->sampler, location);
+        }
+    }
+}
+
 void GfxRenderingAPIGX2::LoadShader(struct ShaderProgram* new_prg) {
     current_shader_program = new_prg;
 
@@ -189,6 +213,7 @@ void GfxRenderingAPIGX2::LoadShader(struct ShaderProgram* new_prg) {
     GX2SetPixelShader(&new_prg->group.pixelShader);
 
     SetUniforms(new_prg);
+    gfx_gx2_bind_textures(new_prg);
 }
 
 struct ShaderProgram* GfxRenderingAPIGX2::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
@@ -254,6 +279,15 @@ uint32_t GfxRenderingAPIGX2::NewTexture(void) {
 void GfxRenderingAPIGX2::DeleteTexture(uint32_t texture_id) {
     struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
 
+    for (int tile = 0; tile < SHADER_MAX_TEXTURES; tile++) {
+        if (current_textures[tile] == tex) {
+            current_textures[tile] = nullptr;
+        }
+    }
+    if (current_texture == tex) {
+        current_texture = nullptr;
+    }
+
     if (tex->texture.surface.image) {
         free(tex->texture.surface.image);
     }
@@ -265,6 +299,9 @@ void GfxRenderingAPIGX2::SelectTexture(int tile, uint32_t texture_id) {
     struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
     current_texture = tex;
     current_tile = tile;
+    if (tile >= 0 && tile < SHADER_MAX_TEXTURES) {
+        current_textures[tile] = tex;
+    }
 
     if (current_shader_program) {
         int32_t sampler_location = current_shader_program->samplers_location[tile];
