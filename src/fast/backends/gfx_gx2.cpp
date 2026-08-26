@@ -172,12 +172,10 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
 }
 
 struct GfxClipParameters GfxRenderingAPIGX2::GetClipParameters(void) {
-    // Latte is D3D-lineage hardware: clip space z runs 0..w, not -w..w. The
-    // D3D11 and Metal backends both report true here; only OpenGL, whose NDC
-    // z is -1..1, reports false. Reporting false fed the interpreter's
-    // OpenGL-convention depth to hardware expecting 0..1 and pushed half the
-    // range outside the usable band.
-    return { true, false };
+    // Reverted from true: the generated Latte vertex shaders emit
+    // OpenGL-convention depth, so reporting a 0..1 clip space here made things
+    // strictly worse on hardware even though Latte is D3D-lineage.
+    return { false, false };
 }
 
 void GfxRenderingAPIGX2::SetUniforms(struct ShaderProgram* prg) {
@@ -510,7 +508,13 @@ void GfxRenderingAPIGX2::SetUseAlpha(bool use_alpha) {
     GX2SetColorControl(GX2_LOGIC_OP_COPY, use_alpha ? 0xff : 0, FALSE, TRUE);
 }
 
+static uint32_t sDrawCalls = 0;
+static uint32_t sDrawTris = 0;
+
 void GfxRenderingAPIGX2::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
+    sDrawCalls++;
+    sDrawTris += (uint32_t)buf_vbo_num_tris;
+
     if (!current_shader_program) {
         return;
     }
@@ -679,6 +683,16 @@ void GfxRenderingAPIGX2::StartFrame(void) {
 }
 
 void GfxRenderingAPIGX2::EndFrame(void) {
+    {
+        static uint32_t frames = 0;
+        if ((frames % 60) == 0) {
+            WHBLogPrintf("[gfx_gx2] frame %u: %u draws, %u tris", frames, sDrawCalls, sDrawTris);
+        }
+        frames++;
+        sDrawCalls = 0;
+        sDrawTris = 0;
+    }
+
     draw_ptr = draw_buffer;
 
     Framebuffer& main_framebuffer = framebuffers[0];
