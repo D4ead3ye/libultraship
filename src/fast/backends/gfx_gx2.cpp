@@ -172,7 +172,12 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
 }
 
 struct GfxClipParameters GfxRenderingAPIGX2::GetClipParameters(void) {
-    return { false, false };
+    // Latte is D3D-lineage hardware: clip space z runs 0..w, not -w..w. The
+    // D3D11 and Metal backends both report true here; only OpenGL, whose NDC
+    // z is -1..1, reports false. Reporting false fed the interpreter's
+    // OpenGL-convention depth to hardware expecting 0..1 and pushed half the
+    // range outside the usable band.
+    return { true, false };
 }
 
 void GfxRenderingAPIGX2::SetUniforms(struct ShaderProgram* prg) {
@@ -222,7 +227,7 @@ struct ShaderProgram* GfxRenderingAPIGX2::CreateAndLoadNewShader(uint64_t shader
 
     struct ShaderProgram* prg = &shader_program_pool[std::make_pair(shader_id0, shader_id1)];
 
-    printf("Generating shader: %016llx-%08x\n", shader_id0, shader_id1);
+    printf("Generating shader: %016llx-%016llx\n", (unsigned long long)shader_id0, (unsigned long long)shader_id1);
     WHBLogPrintf("[gfx_gx2] shader gen id0=%016llx id1=%016llx", (unsigned long long)shader_id0, (unsigned long long)shader_id1);
     if (gx2GenerateShaderGroup(&prg->group, &cc_features) != 0) {
         printf("Failed to generate shader\n");
