@@ -1,4 +1,7 @@
 #include "fast/Fast3dGui.h"
+#ifdef __WIIU__
+#include <whb/log.h>
+#endif
 
 #ifdef __WIIU__
 #include <gx2/registers.h> // GX2SetViewport / GX2SetScissor
@@ -785,6 +788,9 @@ void Fast3dGui::LoadGuiTexture(const std::string& name, const Fast::Texture& res
         texBuffer[pixel * 4 + 3] *= tint.w;
     }
 
+#ifdef __WIIU__
+    WHBLogPrintf("[gui-tex]   built %u bytes, uploading", (unsigned)texBuffer.size());
+#endif
     Ship::GuiTextureMetadata asset;
     asset.RendererTextureId = api->NewTexture();
     asset.Width = res.Width;
@@ -795,12 +801,29 @@ void Fast3dGui::LoadGuiTexture(const std::string& name, const Fast::Texture& res
     api->UploadTexture(texBuffer.data(), res.Width, res.Height);
 
     mGuiTextures[name] = asset;
+#ifdef __WIIU__
+    WHBLogPrintf("[gui-tex]   done");
+#endif
 }
 
 void Fast3dGui::LoadGuiTexture(const std::string& name, const std::string& path, const std::string& palettePath,
                                const ImVec4& tint) {
-    const auto res = static_cast<Fast::Texture*>(
-        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path, true).get());
+    // Hold the resource for the duration. Calling .get() on the returned
+    // shared_ptr let the temporary die at the end of the statement, leaving
+    // this pointer dangling if nothing else held a reference.
+    const auto resource = Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path, true);
+    const auto res = static_cast<Fast::Texture*>(resource.get());
+#ifdef __WIIU__
+    WHBLogPrintf("[gui-tex] %s path=%s res=%p", name.c_str(), path.c_str(), (void*)res);
+#endif
+    if (res == nullptr) {
+        SPDLOG_WARN("ImGui::ResourceLoad: Failed to load asset from path: {}", path);
+        return;
+    }
+#ifdef __WIIU__
+    WHBLogPrintf("[gui-tex]   %ux%u type=%d data=%p", (unsigned)res->Width, (unsigned)res->Height, (int)res->Type,
+                 (void*)res->ImageData);
+#endif
 
     LoadGuiTexture(name, *res, palettePath, tint);
 }
