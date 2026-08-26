@@ -22,6 +22,7 @@
 
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/backends/gfx_gx2.h"
+#include <whb/log.h>
 #include "fast/backends/gfx_wiiu.h"
 #include "fast/interpreter.h"
 
@@ -197,6 +198,7 @@ struct ShaderProgram* GfxRenderingAPIGX2::CreateAndLoadNewShader(uint64_t shader
     struct ShaderProgram* prg = &shader_program_pool[std::make_pair(shader_id0, shader_id1)];
 
     printf("Generating shader: %016llx-%08x\n", shader_id0, shader_id1);
+    WHBLogPrintf("[gfx_gx2] shader gen id0=%016llx id1=%016llx", (unsigned long long)shader_id0, (unsigned long long)shader_id1);
     if (gx2GenerateShaderGroup(&prg->group, &cc_features) != 0) {
         printf("Failed to generate shader\n");
         current_shader_program = nullptr;
@@ -458,10 +460,12 @@ void GfxRenderingAPIGX2::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 }
 
 void GfxRenderingAPIGX2::Init(void) {
+    WHBLogPrintf("[gfx_gx2] Init entered");
     // Init the default framebuffer
     used_framebuffers = 1;
     Framebuffer& main_framebuffer = framebuffers[0];
 
+    WHBLogPrintf("[gfx_gx2] -> main framebuffer");
     gfx_gx2_init_framebuffer(&main_framebuffer, WIIU_DEFAULT_FB_WIDTH, WIIU_DEFAULT_FB_HEIGHT);
 
     GX2CalcSurfaceSizeAndAlignment(&main_framebuffer.color_buffer.surface);
