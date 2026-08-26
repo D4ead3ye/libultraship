@@ -151,6 +151,12 @@ void Fast3dGui::ImGuiWMShutdown() {
 }
 
 void Fast3dGui::ImGuiBackendInit() {
+    // Must happen for every backend: everything from CalculateGameViewport to
+    // LoadGuiTexture reaches the renderer through this, and an early return
+    // past it leaves the weak_ptr empty.
+    auto window = Ship::Context::GetRawInstance()->GetWindow();
+    mInterpreter = std::dynamic_pointer_cast<Fast3dWindow>(window)->GetInterpreterWeak();
+
 #ifdef __WIIU__
     if (mImpl.Backend == WindowBackend::FAST3D_WIIU_GX2) {
         ImGui_ImplGX2_Init();
@@ -159,8 +165,6 @@ void Fast3dGui::ImGuiBackendInit() {
     }
 #endif
 
-    auto window = Ship::Context::GetRawInstance()->GetWindow();
-    mInterpreter = std::dynamic_pointer_cast<Fast3dWindow>(window)->GetInterpreterWeak();
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
