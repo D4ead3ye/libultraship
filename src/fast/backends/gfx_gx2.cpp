@@ -239,6 +239,10 @@ void GfxRenderingAPIGX2::ShaderGetInfo(struct ShaderProgram* prg, uint8_t* num_i
 
 uint32_t GfxRenderingAPIGX2::NewTexture(void) {
     struct GX2TextureObj* tex = (struct GX2TextureObj*)calloc(1, sizeof(struct GX2TextureObj));
+    if (tex == nullptr) {
+        WHBLogPrintf("[gfx_gx2] !! NewTexture calloc failed");
+        return 0;
+    }
 
     tex->imtex.Texture = &tex->texture;
     tex->imtex.Sampler = &tex->sampler;
@@ -308,13 +312,41 @@ void GfxRenderingAPIGX2::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
         GX2InitTextureRegs(&tex->texture);
 
         tex->texture.surface.image = memalign(tex->texture.surface.alignment, tex->texture.surface.imageSize);
+
+        static uint32_t uploadLog = 0;
+        if (uploadLog < 12) {
+            WHBLogPrintf("[gfx_gx2] tex %ux%u pitch=%u size=%u align=%u img=%p", (unsigned)width, (unsigned)height,
+                         (unsigned)tex->texture.surface.pitch, (unsigned)tex->texture.surface.imageSize,
+                         (unsigned)tex->texture.surface.alignment, tex->texture.surface.image);
+            uploadLog++;
+        }
+        if (tex->texture.surface.image == nullptr) {
+            WHBLogPrintf("[gfx_gx2] !! texture alloc FAILED %ux%u size=%u", (unsigned)width, (unsigned)height,
+                         (unsigned)tex->texture.surface.imageSize);
+            return;
+        }
+        // Writing pitch*4 bytes per row for `height` rows has to fit inside the
+        // surface GX2 sized for us, or the copy below walks off the allocation
+        // and corrupts the heap.
+        const uint32_t needed = tex->texture.surface.pitch * 4 * height;
+        if (needed > tex->texture.surface.imageSize) {
+            WHBLogPrintf("[gfx_gx2] !! texture OVERFLOW %ux%u pitch=%u needs=%u have=%u", (unsigned)width,
+                         (unsigned)height, (unsigned)tex->texture.surface.pitch, (unsigned)needed,
+                         (unsigned)tex->texture.surface.imageSize);
+        }
     }
 
     uint8_t* buf = (uint8_t*)tex->texture.surface.image;
     assert(buf);
 
-    for (uint32_t y = 0; y < height; ++y) {
-        memcpy(buf + (y * tex->texture.surface.pitch * 4), rgba32_buf + (y * width * 4), width * 4);
+    // Clamp to what GX2 actually sized the surface for. If the two ever
+    // disagree, lose the bottom of a texture rather than the heap.
+    const uint32_t rowStride = tex->texture.surface.pitch * 4;
+    const uint32_t maxRows = rowStride ? (tex->texture.surface.imageSize / rowStride) : 0;
+    const uint32_t rows = height < maxRows ? height : maxRows;
+    const uint32_t rowBytes = (width * 4) < rowStride ? (width * 4) : rowStride;
+    for (uint32_t y = 0; y < rows; ++y) {
+        memcpy(buf + (y * rowStride), rgba32_buf + (y * width * 4), rowBytes);
     }
 
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, tex->texture.surface.image, tex->texture.surface.imageSize);
