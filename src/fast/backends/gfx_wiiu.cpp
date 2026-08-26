@@ -38,7 +38,6 @@
 #include "fast/backends/gfx_wiiu.h"
 #include <whb/log.h>
 #include <whb/log_udp.h>
-#include <whb/log_console.h>
 #include "fast/backends/gfx_gx2.h"
 #include "fast/backends/gfx_gx2.h"
 #include "fast/backends/gfx_wiiu.h"
@@ -204,7 +203,7 @@ void gfx_wiiu_free_foreground(void* block) {
 static uint32_t gfx_wiiu_proc_callback_acquired(void* context) {
     has_foreground = true;
 
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> init_foreground");
+    WHBLogPrintf("[gfx_wiiu] -> init_foreground");
     bool result = gfx_wiiu_init_foreground();
     assert(result);
 
@@ -245,7 +244,7 @@ static uint32_t gfx_wiiu_proc_callback_released(void* context) {
 
 void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name, bool start_in_fullscreen, uint32_t width,
                           uint32_t height, int32_t posX, int32_t posY) {
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> WHBProcInit");
+    WHBLogPrintf("[gfx_wiiu] -> WHBProcInit");
     WHBProcInit();
 
     uint32_t mem1_addr, mem1_size;
@@ -255,7 +254,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
 
     ProcUISetMEM1Storage(mem1_storage, mem1_size);
 
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> init_mem1");
+    WHBLogPrintf("[gfx_wiiu] -> init_mem1");
     bool result = gfx_wiiu_init_mem1();
     assert(result);
 
@@ -271,10 +270,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
                                GX2_INIT_ARGV,
                                0,
                                GX2_INIT_END };
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> GX2Init (screen log ends here)");
-    WHBLogConsoleDraw();
-    // GX2 and OSScreen cannot both own the scan buffers
-    WHBLogConsoleFree();
+    WHBLogPrintf("[gfx_wiiu] -> GX2Init");
     GX2Init(initAttribs);
 
     switch (GX2GetSystemTVScanMode()) {
@@ -306,7 +302,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
     GX2CalcDRCSize(drc_render_mode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE,
                    &drc_scan_buffer_size, &unk);
 
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> ProcUI callbacks");
+    WHBLogPrintf("[gfx_wiiu] -> ProcUI callbacks");
     ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, gfx_wiiu_proc_callback_acquired, nullptr, 100);
     ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE, gfx_wiiu_proc_callback_released, nullptr, 100);
 
@@ -316,7 +312,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
     assert(context_state);
 
     GX2SetupContextStateEx(context_state, TRUE);
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> GX2SetContextState");
+    WHBLogPrintf("[gfx_wiiu] -> GX2SetContextState");
     GX2SetContextState(context_state);
 
     GX2SetTVScale(WIIU_DEFAULT_FB_WIDTH, WIIU_DEFAULT_FB_HEIGHT);
@@ -329,7 +325,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
     window_impl.Gx2.Height = WIIU_DEFAULT_FB_HEIGHT;
     window_impl.Backend = WindowBackend::FAST3D_WIIU_GX2;
 
-    WHBLogConsoleDraw(), WHBLogPrintf("[gfx_wiiu] -> Gui::Init");
+    WHBLogPrintf("[gfx_wiiu] -> Gui::Init");
     std::dynamic_pointer_cast<Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())
         ->Init(window_impl);
 }

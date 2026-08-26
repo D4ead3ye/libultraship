@@ -1,7 +1,6 @@
 #include "fast/Fast3dWindow.h"
 #ifdef __WIIU__
 #include <whb/log.h>
-#include <whb/log_console.h>
 #endif
 
 #include "ship/Context.h"
@@ -177,7 +176,6 @@ void Fast3dWindow::InitWindowManager() {
             SPDLOG_ERROR("Could not load the correct rendering backend");
 #ifdef __WIIU__
             WHBLogPrintf("[fast3d] NO BACKEND for id %d - about to crash", GetWindowBackend());
-            WHBLogConsoleDraw();
 #endif
             break;
     }
