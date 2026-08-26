@@ -904,6 +904,36 @@ static int generateVertexShader(GX2VertexShader *vsh, CCFeatures *cc_features) {
 }
 #undef ADD_INSTR
 
+// The interpreter packs a vertex attribute as tightly as the combiner needs:
+// a texcoord is 2 floats plus one more per enabled clamp, and a colour input
+// is 3 floats without alpha. The fetch shader has to read exactly that many
+// or every attribute after it comes from the wrong offset.
+static GX2AttribFormat attribFormatForFloats(int count) {
+    switch (count) {
+        case 1:
+            return GX2_ATTRIB_FORMAT_FLOAT_32;
+        case 2:
+            return GX2_ATTRIB_FORMAT_FLOAT_32_32;
+        case 3:
+            return GX2_ATTRIB_FORMAT_FLOAT_32_32_32;
+        default:
+            return GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32;
+    }
+}
+
+static uint32_t attribCompSelForFloats(int count) {
+    switch (count) {
+        case 1:
+            return GX2_COMP_SEL(_x, _0, _0, _1);
+        case 2:
+            return GX2_COMP_SEL(_x, _y, _0, _1);
+        case 3:
+            return GX2_COMP_SEL(_x, _y, _z, _1);
+        default:
+            return GX2_COMP_SEL(_x, _y, _z, _w);
+    }
+}
+
 int gx2GenerateShaderGroup(struct ShaderGroup *group, CCFeatures *cc_features) {
     memset(group, 0, sizeof(struct ShaderGroup));
 
@@ -928,10 +958,11 @@ int gx2GenerateShaderGroup(struct ShaderGroup *group, CCFeatures *cc_features) {
 
     for (int i = 0; i < 2; i++) {
         if (cc_features->usedTextures[i]) {
-            // aTexCoordX
+            // aTexCoordX, packed as (s, t) plus one float per enabled clamp
+            const int comps = 2 + (cc_features->clamp[i][0] ? 1 : 0) + (cc_features->clamp[i][1] ? 1 : 0);
             group->attributes[group->numAttributes++] = 
-                (GX2AttribStream) { 1 + i, 0, attribOffset, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT };
-            attribOffset += 4 * sizeof(float);
+                (GX2AttribStream) { 1 + i, 0, attribOffset, attribFormatForFloats(comps), GX2_ATTRIB_INDEX_PER_VERTEX, 0, attribCompSelForFloats(comps), GX2_ENDIAN_SWAP_DEFAULT };
+            attribOffset += comps * sizeof(float);
         }
     }
 
@@ -949,11 +980,12 @@ int gx2GenerateShaderGroup(struct ShaderGroup *group, CCFeatures *cc_features) {
         attribOffset += 4 * sizeof(float);
     }
 
-    // aInput
+    // aInput - rgb only unless the combiner uses alpha
+    const int inputComps = cc_features->opt_alpha ? 4 : 3;
     for (int i = 0; i < cc_features->numInputs; i++) {
         group->attributes[group->numAttributes++] = 
-            (GX2AttribStream) { 5 + i, 0, attribOffset, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32, GX2_ATTRIB_INDEX_PER_VERTEX, 0, GX2_COMP_SEL(_x, _y, _z, _w), GX2_ENDIAN_SWAP_DEFAULT };
-        attribOffset += 4 * sizeof(float);
+            (GX2AttribStream) { 5 + i, 0, attribOffset, attribFormatForFloats(inputComps), GX2_ATTRIB_INDEX_PER_VERTEX, 0, attribCompSelForFloats(inputComps), GX2_ENDIAN_SWAP_DEFAULT };
+        attribOffset += inputComps * sizeof(float);
     }
 
     group->stride = attribOffset;
