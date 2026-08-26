@@ -84,7 +84,7 @@ static struct GX2TextureObj* current_texture;
 static int current_tile;
 
 // 96 Mb (should be more than enough to draw everything without waiting for the GPU)
-#define DRAW_BUFFER_SIZE 0x6000000
+#define DRAW_BUFFER_SIZE 0x1000000 // 16 MB
 static uint8_t* draw_buffer = nullptr;
 static uint8_t* draw_ptr = nullptr;
 
@@ -471,15 +471,21 @@ void GfxRenderingAPIGX2::Init(void) {
     GX2CalcSurfaceSizeAndAlignment(&main_framebuffer.color_buffer.surface);
     GX2InitColorBufferRegs(&main_framebuffer.color_buffer);
 
+    WHBLogPrintf("[gfx_gx2] color: size=%u align=%u mem1free=%u", (unsigned)main_framebuffer.color_buffer.surface.imageSize,
+                 (unsigned)main_framebuffer.color_buffer.surface.alignment, (unsigned)gfx_wiiu_mem1_free());
     main_framebuffer.color_buffer.surface.image = gfx_wiiu_alloc_mem1(main_framebuffer.color_buffer.surface.imageSize,
                                                                       main_framebuffer.color_buffer.surface.alignment);
+    WHBLogPrintf("[gfx_gx2] color image=%p", main_framebuffer.color_buffer.surface.image);
     assert(main_framebuffer.color_buffer.surface.image);
 
     GX2CalcSurfaceSizeAndAlignment(&main_framebuffer.depth_buffer.surface);
     GX2InitDepthBufferRegs(&main_framebuffer.depth_buffer);
 
+    WHBLogPrintf("[gfx_gx2] depth: size=%u align=%u mem1free=%u", (unsigned)main_framebuffer.depth_buffer.surface.imageSize,
+                 (unsigned)main_framebuffer.depth_buffer.surface.alignment, (unsigned)gfx_wiiu_mem1_free());
     main_framebuffer.depth_buffer.surface.image = gfx_wiiu_alloc_mem1(main_framebuffer.depth_buffer.surface.imageSize,
                                                                       main_framebuffer.depth_buffer.surface.alignment);
+    WHBLogPrintf("[gfx_gx2] depth image=%p", main_framebuffer.depth_buffer.surface.image);
     assert(main_framebuffer.depth_buffer.surface.image);
 
     main_framebuffer.imtex.Texture = &main_framebuffer.texture;
@@ -494,30 +500,40 @@ void GfxRenderingAPIGX2::Init(void) {
 
     GX2CalcSurfaceSizeAndAlignment(&depthReadBuffer.surface);
 
+    WHBLogPrintf("[gfx_gx2] depthread: size=%u align=%u mem1free=%u", (unsigned)depthReadBuffer.surface.imageSize,
+                 (unsigned)depthReadBuffer.surface.alignment, (unsigned)gfx_wiiu_mem1_free());
     depthReadBuffer.surface.image =
-        gfx_wiiu_alloc_mem1(depthReadBuffer.surface.alignment, depthReadBuffer.surface.imageSize);
+        gfx_wiiu_alloc_mem1(depthReadBuffer.surface.imageSize, depthReadBuffer.surface.alignment);
+    WHBLogPrintf("[gfx_gx2] depthread image=%p", depthReadBuffer.surface.image);
     assert(depthReadBuffer.surface.image);
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_DEPTH_BUFFER, depthReadBuffer.surface.image,
                   depthReadBuffer.surface.imageSize);
 
+    WHBLogPrintf("[gfx_gx2] -> set color/depth buffer");
     GX2SetColorBuffer(&main_framebuffer.color_buffer, GX2_RENDER_TARGET_0);
     GX2SetDepthBuffer(&main_framebuffer.depth_buffer);
 
     current_framebuffer = 0;
 
     // allocate draw buffer
+    WHBLogPrintf("[gfx_gx2] -> draw buffer alloc");
     draw_buffer = (uint8_t*)memalign(GX2_VERTEX_BUFFER_ALIGNMENT, DRAW_BUFFER_SIZE);
+    WHBLogPrintf("[gfx_gx2] draw_buffer=%p size=%u", draw_buffer, (unsigned)DRAW_BUFFER_SIZE);
     assert(draw_buffer);
     draw_ptr = draw_buffer;
 
+    WHBLogPrintf("[gfx_gx2] -> rasterizer clip control");
     GX2SetRasterizerClipControl(TRUE, FALSE);
 
     GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA,
                        GX2_BLEND_COMBINE_MODE_ADD, FALSE, GX2_BLEND_MODE_ZERO, GX2_BLEND_MODE_ZERO,
                        GX2_BLEND_COMBINE_MODE_ADD);
 
+    WHBLogPrintf("[gfx_gx2] -> GX2Util::Init");
     GX2Util::Init();
+    WHBLogPrintf("[gfx_gx2] -> set context state");
     gfx_wiiu_set_context_state();
+    WHBLogPrintf("[gfx_gx2] Init complete");
 }
 
 void gfx_gx2_shutdown(void) {

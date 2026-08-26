@@ -148,6 +148,13 @@ void gfx_wiiu_destroy_foreground(void) {
     MEMFreeToFrmHeap(foreground, MEM_FRM_HEAP_FREE_ALL);
 }
 
+uint32_t gfx_wiiu_mem1_free(void) {
+    if (!heap_MEM1) {
+        return 0;
+    }
+    return MEMGetTotalFreeSizeForExpHeap(heap_MEM1);
+}
+
 void* gfx_wiiu_alloc_mem1(uint32_t size, uint32_t alignment) {
     void* block;
 
