@@ -358,6 +358,12 @@ void Fast3dGui::CalculateGameViewport() {
     mainPos.y -= mTemporaryWindowPos.y;
     ImVec2 size = ImGui::GetContentRegionAvail();
     const auto interpreter = mInterpreter.lock().get();
+    if (interpreter == nullptr) {
+        // Reachable before the interpreter is wired up - the extract flow draws
+        // frames during engine construction. Dereferencing here is a hard crash.
+        ImGui::End();
+        return;
+    }
     interpreter->mCurDimensions.width = (uint32_t)(size.x * mInterpreter.lock()->mCurDimensions.internal_mul);
     interpreter->mCurDimensions.height = (uint32_t)(size.y * mInterpreter.lock()->mCurDimensions.internal_mul);
     interpreter->mGameWindowViewport.x = (int16_t)mainPos.x;
