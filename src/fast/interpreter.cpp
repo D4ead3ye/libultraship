@@ -3255,7 +3255,33 @@ void Interpreter::Gfxs2dexRecyCopy(F3DuObjSprite* spr) {
                           (float)(1 << 10) * realSW, (float)(1 << 10) * realSH, false);
 }
 
+#ifdef __WIIU__
+// Bring-up: segment resolution decides whether a model's display list can
+// reach its own vertices, and an unresolved segment silently returns the raw
+// value as a pointer.
+// C linkage: this is a C++ translation unit but the port layer declares these
+// extern "C" alongside the counters that live in C files.
+extern "C" {
+unsigned int gWiiuSegTotal = 0;      // SegAddr calls
+unsigned int gWiiuSegMarked = 0;     // carried the low-bit "segmented" marker
+unsigned int gWiiuSegResolved = 0;   // marked and had a base registered
+unsigned int gWiiuSegUnresolved = 0; // marked but no base - returns garbage
+unsigned int gWiiuSegLooksSeg = 0;   // unmarked, but the top byte looks like a segment id
+}
+#endif
+
 void* Interpreter::SegAddr(uintptr_t w1) {
+#ifdef __WIIU__
+    gWiiuSegTotal++;
+    if (w1 & 1) {
+        gWiiuSegMarked++;
+    } else if (w1 != 0 && (w1 >> 24) < 16) {
+        // A real pointer never lands here: MEM2 addresses are 0x2xxxxxxx and
+        // above. A small top byte means this is a segmented address that lost
+        // its marker, and it is about to be used as a raw pointer.
+        gWiiuSegLooksSeg++;
+    }
+#endif
     // Segmented?
     if (w1 & 1) {
         uint32_t segNum = (uint32_t)(w1 >> 24);
@@ -3263,8 +3289,14 @@ void* Interpreter::SegAddr(uintptr_t w1) {
         uint32_t offset = w1 & 0x00FFFFFE;
 
         if (mSegmentPointers[segNum] != 0) {
+#ifdef __WIIU__
+            gWiiuSegResolved++;
+#endif
             return (void*)(mSegmentPointers[segNum] + offset);
         } else {
+#ifdef __WIIU__
+            gWiiuSegUnresolved++;
+#endif
             return (void*)w1;
         }
     } else {
