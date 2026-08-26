@@ -28,6 +28,9 @@
 #include <string>
 
 #include "fast/interpreter.h"
+#ifdef __WIIU__
+#include <whb/log.h>
+#endif
 #include "fast/lus_gbi.h"
 #include "fast/backends/gfx_window_manager_api.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -112,6 +115,16 @@ static std::string GetPathWithoutFileName(char* filePath) {
 }
 
 constexpr size_t MAX_TRI_BUFFER = 256;
+
+#ifdef __WIIU__
+// Bring-up instrumentation: which gate is dropping the scene's geometry.
+static uint32_t sTriIn = 0;      // entered GfxSpTri1
+static uint32_t sTriClipped = 0; // all three vertices outside one plane
+static uint32_t sTriCulled = 0;  // backface culling
+static uint32_t sTriRect = 0;    // came in as a rect (sprite)
+static uint32_t sVtxLoaded = 0;  // vertices transformed
+static uint32_t sVtxRejAll = 0;  // transformed vertices with a clip_rej set
+#endif
 
 Interpreter::Interpreter() {
     mRsp = new RSP();
@@ -1739,6 +1752,12 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
         if (z > w) {
             d->clip_rej |= 32; // CLIP_FAR
         }
+#ifdef __WIIU__
+        sVtxLoaded++;
+        if (d->clip_rej != 0) {
+            sVtxRejAll++;
+        }
+#endif
 
         d->x = x;
         d->y = y;
@@ -1784,8 +1803,18 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
 
     // if (rand()%2) return;
 
+#ifdef __WIIU__
+    sTriIn++;
+    if (is_rect) {
+        sTriRect++;
+    }
+#endif
+
     if (v1->clip_rej & v2->clip_rej & v3->clip_rej) {
         // The whole triangle lies outside the visible area
+#ifdef __WIIU__
+        sTriClipped++;
+#endif
         return;
     }
 
@@ -1816,14 +1845,23 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
 
         if (cull_type == cull_front) {
             if (cross <= 0) {
+#ifdef __WIIU__
+                sTriCulled++;
+#endif
                 return;
             }
         } else if (cull_type == cull_back) {
             if (cross >= 0) {
+#ifdef __WIIU__
+                sTriCulled++;
+#endif
                 return;
             }
         } else if (cull_type == cull_both) {
             // Why is this even an option?
+#ifdef __WIIU__
+            sTriCulled++;
+#endif
             return;
         }
     }
@@ -5042,6 +5080,17 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
+#ifdef __WIIU__
+    {
+        static uint32_t frames = 0;
+        if ((frames % 60) == 0) {
+            WHBLogPrintf("[f3d] tris in=%u rect=%u clipped=%u culled=%u | vtx=%u rej=%u", sTriIn, sTriRect,
+                         sTriClipped, sTriCulled, sVtxLoaded, sVtxRejAll);
+        }
+        frames++;
+        sTriIn = sTriRect = sTriClipped = sTriCulled = sVtxLoaded = sVtxRejAll = 0;
+    }
+#endif
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {
