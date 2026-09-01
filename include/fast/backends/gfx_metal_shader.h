@@ -1,3 +1,5 @@
+#pragma once
+
 //
 //  gfx_metal_shader.h
 //  libultraship

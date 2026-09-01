@@ -1,3 +1,5 @@
+#pragma once
+
 /*  gfx_gx2.h - Fast3D GX2 backend for libultraship
 
     Created in 2022 by GaryOderNichts
@@ -23,6 +25,8 @@ namespace Fast {
 
 struct ShaderProgram {
     struct ShaderGroup group;
+    uint64_t shader_id0;
+    uint64_t shader_id1;
     uint8_t numInputs;
     bool usedTextures[2];
     bool used_noise;

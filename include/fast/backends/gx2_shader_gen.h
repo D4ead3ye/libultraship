@@ -1,3 +1,5 @@
+#pragma once
+
 /*  gx2_shader_gen.h - Fast3D GX2 shader generator for libultraship
 
     Created in 2022 by GaryOderNichts

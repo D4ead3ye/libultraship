@@ -1,6 +1,7 @@
 // dear imgui: Renderer Backend for the Nintendo Wii U using GX2
 #include "imgui.h"
 #include "imgui_impl_gx2.h"
+#include <whb/log.h>
 #include <stdio.h>
 #include <stdint.h>     // intptr_t
 #include <malloc.h>     // memalign

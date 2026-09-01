@@ -6,6 +6,7 @@
 
 // Software keyboard
 #include <nn/swkbd.h>
+#include <whb/log.h> // [touchdiag]
 
 // Wii U Data
 struct ImGui_ImplWiiU_Data
@@ -16,6 +17,8 @@ struct ImGui_ImplWiiU_Data
 
     bool WantedTextInput;
     bool WasTouched;
+    float LastTouchX;
+    float LastTouchY;
 
     ImGui_ImplWiiU_Data()   { memset((void*)this, 0, sizeof(*this)); }
 };
@@ -179,16 +182,49 @@ static void ImGui_ImplWiiU_UpdateTouchInput(const ImGui_ImplWiiU_ControllerInput
     ImGui_ImplWiiU_Data* bd = ImGui_ImplWiiU_GetBackendData();
     ImGuiIO& io = ImGui::GetIO();
 
+    // [port] tpNormal is raw panel data now, matching hardware, so calibrate it
+    // here as the API intends. The old comment claimed the SDL shim delivered
+    // calibrated values; it delivered screen pixels, which only happened to work
+    // because this path skipped calibration entirely.
     VPADTouchData touch;
-    // Our SDL->VPAD code already gets calibrated data
-    // VPADGetTPCalibratedPoint(VPAD_CHAN_0, &touch, &input->vpad->tpNormal);
-    memcpy(&touch, &input->vpad->tpNormal, sizeof(VPADTouchData));
+    VPADGetTPCalibratedPoint(VPAD_CHAN_0, &touch, &input->vpad->tpNormal);
+
+    // [port] A touch has no hover phase: the position and the press happen at the
+    // same instant. ImGui's event trickling assumes a mouse and spreads queued
+    // events over several frames, so with input sampled faster than frames are
+    // drawn the position ran behind the press by ~3 samples and taps landed
+    // wherever the cursor had got to. Apply the whole queue each frame instead.
+    io.ConfigInputTrickleEventQueue = false;
 
     if (touch.touched)
     {
-        float scale_x = (io.DisplaySize.x / io.DisplayFramebufferScale.x) / 1280.0f;
-        float scale_y = (io.DisplaySize.y / io.DisplayFramebufferScale.y) / 720.0f;
-        io.AddMousePosEvent(touch.x * scale_x, touch.y * scale_y);
+        // Measured: VPADGetTPCalibratedPoint returns display-space coordinates,
+        // roughly 0..1280 x 0..720 (four corners read 101..1256, 43..708), not the
+        // GamePad's 854x480 panel size. So the original divisor here was correct;
+        // what was broken was the shim feeding it screen pixels instead of raw.
+        const float scale_x = io.DisplaySize.x / 1280.0f;
+        const float scale_y = io.DisplaySize.y / 720.0f;
+        const float mx = touch.x * scale_x;
+        const float my = touch.y * scale_y;
+        { // [touchdiag] confirm the calibrated range; four corners give the bounds
+            static float mnx = 9e9f, mxx = -9e9f, mny = 9e9f, mxy = -9e9f;
+            bool grew = false;
+            if (touch.x < mnx) { mnx = touch.x; grew = true; }
+            if (touch.x > mxx) { mxx = touch.x; grew = true; }
+            if (touch.y < mny) { mny = touch.y; grew = true; }
+            if (touch.y > mxy) { mxy = touch.y; grew = true; }
+            if (grew) {
+                WHBLogPrintf("[touchdiag] calibrated x %.0f..%.0f y %.0f..%.0f -> mouse %.0f,%.0f",
+                             mnx, mxx, mny, mxy, mx, my);
+            }
+        }
+        // Only queue actual movement, so a held stylus does not bury the press
+        // under a run of identical position events.
+        if (!bd->WasTouched || mx != bd->LastTouchX || my != bd->LastTouchY) {
+            io.AddMousePosEvent(mx, my);
+            bd->LastTouchX = mx;
+            bd->LastTouchY = my;
+        }
     }
 
     if (touch.touched != bd->WasTouched)

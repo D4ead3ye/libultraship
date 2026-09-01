@@ -22,6 +22,8 @@
 
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/backends/gfx_gx2.h"
+#include <coreinit/memheap.h>
+#include <coreinit/memexpheap.h>
 #include <whb/log.h>
 #include "fast/backends/gfx_wiiu.h"
 #include "fast/interpreter.h"
@@ -57,6 +59,20 @@ struct GX2TextureObj {
 
     // For ImGui rendering
     ImGui_ImplGX2_Texture imtex;
+
+    // [port] The parameters this framebuffer was last built with. The foreground
+    // handover frees these surfaces, but the interpreter only calls
+    // UpdateFramebufferParameters when the size it wants *changes* - and it does
+    // not change across a handover, so the call never comes and the surface stays
+    // freed. Keeping the parameters lets the restore rebuild them itself.
+    bool paramsValid;
+    uint32_t lastWidth;
+    uint32_t lastHeight;
+    uint32_t lastMsaa;
+    bool lastInvertY;
+    bool lastRenderTarget;
+    bool lastHasDepth;
+    bool lastCanExtractDepth;
 };
 
 struct Framebuffer {
@@ -70,7 +86,25 @@ struct Framebuffer {
 
     // For ImGui rendering
     ImGui_ImplGX2_Texture imtex;
+
+    // [port] The parameters this framebuffer was last built with. The foreground
+    // handover frees these surfaces, but the interpreter only calls
+    // UpdateFramebufferParameters when the size it wants *changes* - and it does
+    // not change across a handover, so the call never comes and the surface stays
+    // freed. Keeping the parameters lets the restore rebuild them itself.
+    bool paramsValid;
+    uint32_t lastWidth;
+    uint32_t lastHeight;
+    uint32_t lastMsaa;
+    bool lastInvertY;
+    bool lastRenderTarget;
+    bool lastHasDepth;
+    bool lastCanExtractDepth;
 };
+
+// [port] The MEM1 restore hook has C linkage and no instance of its own, but it
+// needs to rebuild framebuffers through the normal path. Init records it here.
+static GfxRenderingAPIGX2* sActiveApi = nullptr;
 
 static std::array<Framebuffer, 100> framebuffers;
 static std::size_t used_framebuffers;
@@ -86,6 +120,21 @@ static struct GX2TextureObj* current_texture;
 // changes, so a draw that switches shader while keeping the same texture would
 // otherwise leave it bound to the previous shader's sampler slot.
 static struct GX2TextureObj* current_textures[SHADER_MAX_TEXTURES];
+
+// [port] A framebuffer bound as a texture does not live in current_textures -
+// SelectTextureFb hands GX2 the framebuffer's own texture object directly. Track
+// it separately so that a LoadShader arriving after SelectTextureFb rebinds the
+// framebuffer rather than clobbering sampler 0 with the last ordinary texture.
+static GX2Texture* current_fb_texture = nullptr;
+static GX2Sampler* current_fb_sampler = nullptr;
+static uint32_t sTexLive = 0;   // GX2 textures allocated and not yet freed
+static uint32_t sTexBytes = 0;  // and the bytes they hold
+static uint32_t sTexUploads = 0; // UploadTexture calls this second
+static uint32_t sTexReallocs = 0; // of those, ones that had to reallocate
+static OSTime sCpuTicks = 0;      // time inside DrawTriangles submission
+static OSTime sPeriodStart = 0;
+static OSTime sFrameTicks = 0;   // StartFrame..EndFrame: the whole in-frame CPU cost
+static OSTime sFrameT0 = 0;
 static int current_tile;
 
 // 96 Mb (should be more than enough to draw everything without waiting for the GPU)
@@ -171,11 +220,114 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
     buffer->depth_buffer.depthClear = 1.0f;
 }
 
+// [port] MEM1 is foreground memory. When the system takes the foreground for the
+// HOME menu it reclaims MEM1, but the colour, depth and depth-read surfaces live
+// there, so anything that keeps drawing writes into memory the app no longer
+// owns - which is the hard freeze. ProcUI's release callback has to give these
+// back, and its acquire callback has to build them again.
+extern "C" void gfx_gx2_release_mem1_surfaces(void) {
+    // Framebuffer 0 owns its colour and depth surfaces directly. The secondary
+    // ones (the pause background capture) are managed by
+    // UpdateFramebufferParameters and may be in MEM1 or the normal heap, so free
+    // them the way that function does and clear the recorded size, which is what
+    // makes it rebuild them instead of early-returning on a matching size.
+    Framebuffer& main_fb = framebuffers[0];
+    if (main_fb.color_buffer.surface.image) {
+        gfx_wiiu_free_mem1(main_fb.color_buffer.surface.image);
+        main_fb.color_buffer.surface.image = nullptr;
+    }
+    if (main_fb.depth_buffer.surface.image) {
+        gfx_wiiu_free_mem1(main_fb.depth_buffer.surface.image);
+        main_fb.depth_buffer.surface.image = nullptr;
+    }
+
+    for (std::size_t i = 1; i < used_framebuffers; i++) {
+        Framebuffer& fb = framebuffers[i];
+        if (fb.texture.surface.image) {
+            if (fb.colorBufferMem1) {
+                gfx_wiiu_free_mem1(fb.texture.surface.image);
+            } else {
+                free(fb.texture.surface.image);
+            }
+            fb.texture.surface.image = nullptr;
+        }
+        if (fb.depth_buffer.surface.image) {
+            if (fb.depthBufferMem1) {
+                gfx_wiiu_free_mem1(fb.depth_buffer.surface.image);
+            } else {
+                free(fb.depth_buffer.surface.image);
+            }
+            fb.depth_buffer.surface.image = nullptr;
+        }
+        fb.color_buffer.surface.image = nullptr;
+        fb.texture.surface.width = 0;
+        fb.texture.surface.height = 0;
+    }
+    if (depthReadBuffer.surface.image) {
+        gfx_wiiu_free_mem1(depthReadBuffer.surface.image);
+        depthReadBuffer.surface.image = nullptr;
+    }
+    WHBLogPrintf("[gfx_gx2] released MEM1 surfaces for foreground handover");
+}
+
+extern "C" void gfx_gx2_restore_mem1_surfaces(void) {
+    // Only framebuffer 0 is rebuilt here; the rest come back through
+    // UpdateFramebufferParameters the next time the game asks for them.
+    Framebuffer& fb = framebuffers[0];
+
+    GX2CalcSurfaceSizeAndAlignment(&fb.color_buffer.surface);
+    GX2InitColorBufferRegs(&fb.color_buffer);
+    fb.color_buffer.surface.image =
+        gfx_wiiu_alloc_mem1(fb.color_buffer.surface.imageSize, fb.color_buffer.surface.alignment);
+
+    GX2CalcSurfaceSizeAndAlignment(&fb.depth_buffer.surface);
+    GX2InitDepthBufferRegs(&fb.depth_buffer);
+    fb.depth_buffer.surface.image =
+        gfx_wiiu_alloc_mem1(fb.depth_buffer.surface.imageSize, fb.depth_buffer.surface.alignment);
+
+    if (!fb.color_buffer.surface.image || !fb.depth_buffer.surface.image) {
+        WHBLogPrintf("[gfx_gx2] !! MEM1 restore FAILED for the main framebuffer");
+        return;
+    }
+
+    GX2CalcSurfaceSizeAndAlignment(&depthReadBuffer.surface);
+    depthReadBuffer.surface.image =
+        gfx_wiiu_alloc_mem1(depthReadBuffer.surface.imageSize, depthReadBuffer.surface.alignment);
+    if (depthReadBuffer.surface.image) {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_DEPTH_BUFFER, depthReadBuffer.surface.image,
+                      depthReadBuffer.surface.imageSize);
+    }
+
+    // [port] Rebuild the secondary framebuffers (pause capture, transition) here
+    // too. Their dimensions were zeroed on release so this will not early-return.
+    // Leaving them for the interpreter meant they came back with no surface at
+    // all, which is why the pause background and the puzzle-piece transition
+    // turned black after a handover.
+    for (std::size_t i = 1; sActiveApi != nullptr && i < used_framebuffers; i++) {
+        Framebuffer& sec = framebuffers[i];
+        if (!sec.paramsValid || sec.lastWidth == 0 || sec.lastHeight == 0) {
+            continue;
+        }
+        sActiveApi->UpdateFramebufferParameters(static_cast<int>(i), sec.lastWidth, sec.lastHeight, sec.lastMsaa,
+                                                sec.lastInvertY, sec.lastRenderTarget, sec.lastHasDepth,
+                                                sec.lastCanExtractDepth);
+    }
+
+    GX2SetColorBuffer(&framebuffers[0].color_buffer, GX2_RENDER_TARGET_0);
+    GX2SetDepthBuffer(&framebuffers[0].depth_buffer);
+    current_framebuffer = 0;
+    WHBLogPrintf("[gfx_gx2] restored MEM1 surfaces after regaining foreground");
+}
+
 struct GfxClipParameters GfxRenderingAPIGX2::GetClipParameters(void) {
-    // Reverted from true: the generated Latte vertex shaders emit
-    // OpenGL-convention depth, so reporting a 0..1 clip space here made things
-    // strictly worse on hardware even though Latte is D3D-lineage.
-    return { false, false };
+    // Latte clips to the D3D-style 0 <= z <= w, and the viewport is set with a
+    // 0..1 depth range to match, so the interpreter has to emit z in that space.
+    //
+    // This was reverted to false once before. On its own it changes nothing
+    // visible, because z clipping was disabled in StartFrame, so the earlier
+    // test could not have shown a difference. It is only meaningful paired with
+    // GX2SetRasterizerClipControl(TRUE, TRUE).
+    return { true, false };
 }
 
 void GfxRenderingAPIGX2::SetUniforms(struct ShaderProgram* prg) {
@@ -189,6 +341,57 @@ void GfxRenderingAPIGX2::UnloadShader(struct ShaderProgram* old_prg) {
     current_shader_program = nullptr;
 }
 
+// [port] A shader may sample a texture unit that the interpreter never bound
+// anything to (a two-cycle combiner using TEXEL1 while only tile 0 was loaded).
+// A desktop GL driver returns black for an unbound sampler, but GX2 leaves
+// whatever texture descriptor was last written to that unit, so the GPU fetches
+// from arbitrary memory and paints saturated garbage across the triangle. Bind a
+// known 1x1 opaque white texel instead, which is also the combiner identity.
+static GX2Texture dummy_texture;
+static GX2Sampler dummy_sampler;
+static bool dummy_texture_ready = false;
+
+static void gfx_gx2_init_dummy_texture(void) {
+    if (dummy_texture_ready) {
+        return;
+    }
+
+    memset(&dummy_texture, 0, sizeof(dummy_texture));
+    dummy_texture.surface.use = GX2_SURFACE_USE_TEXTURE;
+    dummy_texture.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    dummy_texture.surface.width = 1;
+    dummy_texture.surface.height = 1;
+    dummy_texture.surface.depth = 1;
+    dummy_texture.surface.mipLevels = 1;
+    dummy_texture.surface.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+    dummy_texture.surface.aa = GX2_AA_MODE1X;
+    dummy_texture.surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    dummy_texture.viewFirstMip = 0;
+    dummy_texture.viewNumMips = 1;
+    dummy_texture.viewFirstSlice = 0;
+    dummy_texture.viewNumSlices = 1;
+    dummy_texture.compMap = GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B, GX2_SQ_SEL_A);
+
+    GX2CalcSurfaceSizeAndAlignment(&dummy_texture.surface);
+    GX2InitTextureRegs(&dummy_texture);
+
+    dummy_texture.surface.image = memalign(dummy_texture.surface.alignment, dummy_texture.surface.imageSize);
+    if (dummy_texture.surface.image == nullptr) {
+        WHBLogPrintf("[gfx_gx2] !! dummy texture alloc FAILED size=%u", (unsigned)dummy_texture.surface.imageSize);
+        return;
+    }
+    memset(dummy_texture.surface.image, 0xFF, dummy_texture.surface.imageSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, dummy_texture.surface.image, dummy_texture.surface.imageSize);
+
+    // Linear: this backs a 1x1 white texel where filtering is irrelevant, and it
+    // is also the fallback for any unbound unit, where point sampling would be a
+    // silent downgrade.
+    GX2InitSampler(&dummy_sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_LINEAR);
+
+    dummy_texture_ready = true;
+    WHBLogPrintf("[gfx_gx2] dummy 1x1 texture ready (size=%u)", (unsigned)dummy_texture.surface.imageSize);
+}
+
 static void gfx_gx2_bind_textures(struct ShaderProgram* prg) {
     if (prg == nullptr) {
         return;
@@ -196,14 +399,27 @@ static void gfx_gx2_bind_textures(struct ShaderProgram* prg) {
     for (int tile = 0; tile < SHADER_MAX_TEXTURES; tile++) {
         struct GX2TextureObj* tex = current_textures[tile];
         const int32_t location = prg->samplers_location[tile];
-        if (tex == nullptr || location == -1) {
+        if (location == -1) {
             continue;
         }
-        if (tex->texture_uploaded) {
-            GX2SetPixelTexture(&tex->texture, location);
+        if (tile == 0 && current_fb_texture != nullptr) {
+            GX2SetPixelTexture(current_fb_texture, location);
+            GX2SetPixelSampler(current_fb_sampler, location);
+            continue;
         }
+        // The shader samples this unit. Never leave it holding a stale descriptor.
+        if (tex == nullptr || !tex->texture_uploaded) {
+            if (dummy_texture_ready) {
+                GX2SetPixelTexture(&dummy_texture, location);
+                GX2SetPixelSampler(&dummy_sampler, location);
+            }
+            continue;
+        }
+        GX2SetPixelTexture(&tex->texture, location);
         if (tex->sampler_set) {
             GX2SetPixelSampler(&tex->sampler, location);
+        } else {
+            GX2SetPixelSampler(&dummy_sampler, location);
         }
     }
 }
@@ -233,6 +449,8 @@ struct ShaderProgram* GfxRenderingAPIGX2::CreateAndLoadNewShader(uint64_t shader
         return nullptr;
     }
 
+    prg->shader_id0 = shader_id0;
+    prg->shader_id1 = shader_id1;
     prg->numInputs = cc_features.numInputs;
     prg->usedTextures[0] = cc_features.usedTextures[0];
     prg->usedTextures[1] = cc_features.usedTextures[1];
@@ -275,6 +493,13 @@ uint32_t GfxRenderingAPIGX2::NewTexture(void) {
     tex->imtex.Texture = &tex->texture;
     tex->imtex.Sampler = &tex->sampler;
 
+    // [port] calloc leaves sampler_set false, and the unbound-sampler fallback
+    // then binds the point-sampled dummy on every LoadShader - overriding the
+    // bilinear the display list asked for. Give every texture a real sampler up
+    // front; SetSamplerParameters refines it per draw.
+    GX2InitSampler(&tex->sampler, GX2_TEX_CLAMP_MODE_WRAP, GX2_TEX_XY_FILTER_MODE_LINEAR);
+    tex->sampler_set = true;
+
     // some 32-bit trickery :P
     return (uint32_t)tex;
 }
@@ -302,6 +527,11 @@ void GfxRenderingAPIGX2::SelectTexture(int tile, uint32_t texture_id) {
     struct GX2TextureObj* tex = (struct GX2TextureObj*)texture_id;
     current_texture = tex;
     current_tile = tile;
+    if (tile == 0) {
+        // An ordinary texture reclaims sampler 0 from any framebuffer binding.
+        current_fb_texture = nullptr;
+        current_fb_sampler = nullptr;
+    }
     if (tile >= 0 && tile < SHADER_MAX_TEXTURES) {
         current_textures[tile] = tex;
     }
@@ -353,13 +583,6 @@ void GfxRenderingAPIGX2::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
 
         tex->texture.surface.image = memalign(tex->texture.surface.alignment, tex->texture.surface.imageSize);
 
-        static uint32_t uploadLog = 0;
-        if (uploadLog < 12) {
-            WHBLogPrintf("[gfx_gx2] tex %ux%u pitch=%u size=%u align=%u img=%p", (unsigned)width, (unsigned)height,
-                         (unsigned)tex->texture.surface.pitch, (unsigned)tex->texture.surface.imageSize,
-                         (unsigned)tex->texture.surface.alignment, tex->texture.surface.image);
-            uploadLog++;
-        }
         if (tex->texture.surface.image == nullptr) {
             WHBLogPrintf("[gfx_gx2] !! texture alloc FAILED %ux%u size=%u", (unsigned)width, (unsigned)height,
                          (unsigned)tex->texture.surface.imageSize);
@@ -414,7 +637,12 @@ static GX2TexClampMode gfx_cm_to_gx2(uint32_t val) {
 }
 
 void GfxRenderingAPIGX2::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
-    struct GX2TextureObj* tex = current_texture;
+    // [port] This used current_texture - whichever was selected last - so on a
+    // two-tile draw the filter landed on the wrong texture object and the tile
+    // that asked for it kept its old sampler.
+    struct GX2TextureObj* tex =
+        (tile >= 0 && tile < SHADER_MAX_TEXTURES && current_textures[tile] != nullptr) ? current_textures[tile]
+                                                                                      : current_texture;
     assert(tex);
 
     current_tile = tile;
@@ -424,6 +652,7 @@ void GfxRenderingAPIGX2::SetSamplerParameters(int tile, bool linear_filter, uint
                                                                            : GX2_TEX_XY_FILTER_MODE_POINT);
 
     GX2InitSamplerClamping(&tex->sampler, gfx_cm_to_gx2(cms), gfx_cm_to_gx2(cmt), GX2_TEX_CLAMP_MODE_WRAP);
+
 
     if (current_shader_program && current_shader_program->samplers_location[tile] != -1) {
         GX2SetPixelSampler(&tex->sampler, current_shader_program->samplers_location[tile]);
@@ -487,6 +716,7 @@ void GfxRenderingAPIGX2::SetViewport(int x, int y, int width, int height) {
     current_viewport_width = width;
     current_viewport_height = height;
 
+
     GX2SetViewport(current_viewport_x, current_viewport_y, current_viewport_width, current_viewport_height, 0.0f, 1.0f);
 }
 
@@ -495,10 +725,42 @@ void GfxRenderingAPIGX2::SetScissor(int x, int y, int width, int height) {
     uint32_t buffer_height = buffer.color_buffer.surface.height;
     uint32_t buffer_width = buffer.color_buffer.surface.width;
 
-    current_scissor_x = std::min((uint32_t)width, (uint32_t)x);
-    current_scissor_y = std::min((uint32_t)height, buffer_height - y - height);
-    current_scissor_width = std::min((uint32_t)width, buffer_width);
-    current_scissor_height = std::min((uint32_t)height, buffer_height);
+    // [port] GX2's origin is top-left, so y flips exactly as it does in
+    // SetViewport. The previous code clamped x against width and y against
+    // height, which is not a bounds check: any scissor shorter than its flipped
+    // y position was placed at the wrong height, and any rect whose x exceeded
+    // its own width was pulled back to the width. Clamp against the buffer.
+    int32_t sx = x;
+    int32_t sy = (int32_t)buffer_height - y - height;
+    int32_t sw = width;
+    int32_t sh = height;
+
+    if (sx < 0) {
+        sw += sx;
+        sx = 0;
+    }
+    if (sy < 0) {
+        sh += sy;
+        sy = 0;
+    }
+    if (sw > (int32_t)buffer_width - sx) {
+        sw = (int32_t)buffer_width - sx;
+    }
+    if (sh > (int32_t)buffer_height - sy) {
+        sh = (int32_t)buffer_height - sy;
+    }
+    if (sw < 0) {
+        sw = 0;
+    }
+    if (sh < 0) {
+        sh = 0;
+    }
+
+    current_scissor_x = (uint32_t)sx;
+    current_scissor_y = (uint32_t)sy;
+    current_scissor_width = (uint32_t)sw;
+    current_scissor_height = (uint32_t)sh;
+
 
     GX2SetScissor(current_scissor_x, current_scissor_y, current_scissor_width, current_scissor_height);
 }
@@ -510,6 +772,7 @@ void GfxRenderingAPIGX2::SetUseAlpha(bool use_alpha) {
 
 static uint32_t sDrawCalls = 0;
 static uint32_t sDrawTris = 0;
+static uint32_t sDrawWraps = 0;
 
 void GfxRenderingAPIGX2::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     sDrawCalls++;
@@ -521,8 +784,27 @@ void GfxRenderingAPIGX2::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 
     size_t vbo_len = sizeof(float) * buf_vbo_len;
 
+    // [port] The interpreter packs a variable number of floats per vertex
+    // depending on the shader variant, and the attribute layout generated for
+    // that variant must agree exactly. If it does not, the GPU reads positions
+    // and colors out of the wrong floats, which draws screen-sized triangles in
+    // clamped primary colors. Verify rather than assume.
+    if (buf_vbo_num_tris > 0) {
+        const size_t packedStride = (buf_vbo_len / (3 * buf_vbo_num_tris)) * sizeof(float);
+        if (packedStride != current_shader_program->group.stride) {
+            static uint32_t reported = 0;
+            if (reported++ < 8) {
+                WHBLogPrintf("[gfx_gx2] STRIDE MISMATCH id0=%016llx id1=%016llx: packed %u bytes/vtx, layout says %u",
+                             (unsigned long long)current_shader_program->shader_id0,
+                             (unsigned long long)current_shader_program->shader_id1, (unsigned)packedStride,
+                             (unsigned)current_shader_program->group.stride);
+            }
+        }
+    }
+
     if (draw_ptr + vbo_len >= draw_buffer + DRAW_BUFFER_SIZE) {
-        printf("Waiting on GPU!!!\n");
+        // Genuinely out of room: the GPU must finish before we reuse the ring.
+        sDrawWraps++;
         GX2DrawDone();
         draw_ptr = draw_buffer;
     }
@@ -538,6 +820,7 @@ void GfxRenderingAPIGX2::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size
 }
 
 void GfxRenderingAPIGX2::Init(void) {
+    sActiveApi = this;
     WHBLogPrintf("[gfx_gx2] Init entered");
     // Init the default framebuffer
     used_framebuffers = 1;
@@ -597,11 +880,22 @@ void GfxRenderingAPIGX2::Init(void) {
     WHBLogPrintf("[gfx_gx2] -> draw buffer alloc");
     draw_buffer = (uint8_t*)memalign(GX2_VERTEX_BUFFER_ALIGNMENT, DRAW_BUFFER_SIZE);
     WHBLogPrintf("[gfx_gx2] draw_buffer=%p size=%u", draw_buffer, (unsigned)DRAW_BUFFER_SIZE);
+    gfx_gx2_init_dummy_texture();
     assert(draw_buffer);
     draw_ptr = draw_buffer;
 
-    WHBLogPrintf("[gfx_gx2] -> rasterizer clip control");
-    GX2SetRasterizerClipControl(TRUE, FALSE);
+    WHBLogPrintf("[gfx_gx2] -> rasterizer clip control (z clip ENABLED)");
+    // [port] Z clipping was disabled here. Fast3D deliberately does not clip
+    // triangles that straddle the near plane, it leaves that to the GPU, so with
+    // this off such a triangle is rasterised from its extrapolated coordinates
+    // and smears across the whole screen. Vertices arriving with w=5 against a
+    // ~311 translation baseline are exactly that case.
+    //
+    // This only works together with the 0..1 clip space reported by
+    // GetClipParameters(): enabling clipping while the interpreter emits
+    // OpenGL-convention z in [-w,w] would clip away everything in the near half
+    // of the range, 2D elements at z=-1 included. Change the two as a pair.
+    GX2SetRasterizerClipControl(TRUE, TRUE);
 
     GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA,
                        GX2_BLEND_COMBINE_MODE_ADD, FALSE, GX2_BLEND_MODE_ZERO, GX2_BLEND_MODE_ZERO,
@@ -683,17 +977,20 @@ void GfxRenderingAPIGX2::StartFrame(void) {
 }
 
 void GfxRenderingAPIGX2::EndFrame(void) {
-    {
-        static uint32_t frames = 0;
-        if ((frames % 60) == 0) {
-            WHBLogPrintf("[gfx_gx2] frame %u: %u draws, %u tris", frames, sDrawCalls, sDrawTris);
-        }
-        frames++;
-        sDrawCalls = 0;
-        sDrawTris = 0;
-    }
+    sDrawCalls = 0;
+    sDrawTris = 0;
 
-    draw_ptr = draw_buffer;
+    // [port] This used to rewind draw_ptr to the start of the buffer every
+    // frame with no GPU synchronisation, so the CPU began overwriting vertex
+    // data the GPU was still reading for the previous frame. The interpreter
+    // output is correct - every triangle it submits sits inside [-1,1] - but
+    // the GPU saw half of it replaced mid-draw, which produced the triangles
+    // sprawling across the screen, and is why the image became correct the
+    // instant the app stopped drawing at shutdown.
+    //
+    // Use the allocation as a real ring: wrap only when genuinely full, where
+    // DrawTriangles already waits on GX2DrawDone(). At ~200KB a frame a 16MB
+    // buffer wraps roughly every 80 frames, so the stall is rare.
 
     Framebuffer& main_framebuffer = framebuffers[0];
 
@@ -730,9 +1027,25 @@ void GfxRenderingAPIGX2::UpdateFramebufferParameters(int fb, uint32_t width, uin
 
     Framebuffer& buffer = framebuffers[fb];
 
+    buffer.paramsValid = true;
+    buffer.lastWidth = width;
+    buffer.lastHeight = height;
+    buffer.lastMsaa = msaa_level;
+    buffer.lastInvertY = opengl_invert_y;
+    buffer.lastRenderTarget = render_target;
+    buffer.lastHasDepth = has_depth_buffer;
+    buffer.lastCanExtractDepth = can_extract_depth;
+
     if (buffer.texture.surface.width == width && buffer.texture.surface.height == height) {
         return;
     }
+
+    // [port] The pause menu draws the frozen scene from one of these. It is
+    // arriving blocky, so report the size the game actually asks for against the
+    // main framebuffer it is captured from.
+    WHBLogPrintf("[fb] update fb%d -> %ux%u (main is %ux%u) msaa=%u depth=%d", fb, (unsigned)width, (unsigned)height,
+                 (unsigned)framebuffers[0].color_buffer.surface.width,
+                 (unsigned)framebuffers[0].color_buffer.surface.height, (unsigned)msaa_level, (int)has_depth_buffer);
 
     // make sure the GPU no longer writes to the buffer
     GX2DrawDone();
@@ -863,6 +1176,20 @@ void GfxRenderingAPIGX2::SelectTextureFb(int fb) {
     Framebuffer& buffer = framebuffers[fb];
 
     assert(current_shader_program);
+
+    // [port] The texture and the colour buffer share one allocation, but the GPU
+    // wrote it through the colour path and is about to read it through the
+    // texture path. Without invalidating, the texture unit keeps serving what it
+    // cached earlier - which is why the pause and game over screens showed a
+    // stale, blocky image instead of the scene that was just rendered.
+    if (buffer.texture.surface.image != nullptr) {
+        GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER | GX2_INVALIDATE_MODE_TEXTURE, buffer.texture.surface.image,
+                      buffer.texture.surface.imageSize);
+    }
+
+    current_fb_texture = &buffer.texture;
+    current_fb_sampler = &buffer.sampler;
+
     uint32_t location = current_shader_program->samplers_location[0];
     GX2SetPixelTexture(&buffer.texture, location);
     GX2SetPixelSampler(&buffer.sampler, location);
@@ -888,6 +1215,14 @@ void GfxRenderingAPIGX2::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX0
     GX2Point dst = { dstX0, dstY0 };
     GX2CopySurfaceEx(&src_buffer.color_buffer.surface, 0, 0, &dst_buffer.color_buffer.surface, 0, 0, 1, &src, &dst);
 
+    // The destination is sampled as a texture straight after this, so the copy
+    // has to be visible to the texture unit rather than sitting in the colour
+    // cache.
+    if (dst_buffer.texture.surface.image != nullptr) {
+        GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER | GX2_INVALIDATE_MODE_TEXTURE,
+                      dst_buffer.texture.surface.image, dst_buffer.texture.surface.imageSize);
+    }
+
     gfx_wiiu_set_context_state();
 }
 
@@ -901,13 +1236,20 @@ void GfxRenderingAPIGX2::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
     // Create a temporary linear surface in the correct format
     GX2Surface surface;
     memset(&surface, 0, sizeof(GX2Surface));
-    surface.use = GX2_SURFACE_USE_TEXTURE;
+    // [port] ConvertSurface renders into this surface, so it has to be usable as
+    // a colour buffer as well - asking for USE_TEXTURE alone sizes and aligns it
+    // as a plain texture while the GPU writes it as a render target.
+    surface.use = (GX2SurfaceUse)(GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER);
     surface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
     surface.width = width;
     surface.height = height;
     surface.depth = 1;
     surface.mipLevels = 1;
-    surface.format = GX2_SURFACE_FORMAT_UNORM_A1_B5_G5_R5; //GX2_SURFACE_FORMAT_UNORM_R5_G5_B5_A1;
+    // [port] The caller only byteswaps the result on little-endian hosts, so on
+    // Wii U this has to come out of the GPU already in N64 RGBA16 order, red in
+    // the high bits. A1_B5_G5_R5 is the little-endian spelling and lands alpha
+    // and blue there instead, which is what tinted the captured screen blue.
+    surface.format = GX2_SURFACE_FORMAT_UNORM_R5_G5_B5_A1;
     surface.aa = GX2_AA_MODE1X;
     surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
     GX2CalcSurfaceSizeAndAlignment(&surface);
@@ -917,6 +1259,12 @@ void GfxRenderingAPIGX2::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
 
     GX2Util::ConvertSurface(&buffer.color_buffer.surface, &surface);
     GX2DrawDone();
+
+    // [port] The GPU has just written this buffer; the CPU is about to read it.
+    // Without invalidating here the CPU serves stale cache lines for the block
+    // memalign handed back, so the capture is whatever previously occupied that
+    // memory rather than the frame that was just drawn.
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, surface.image, surface.imageSize);
 
     gfx_wiiu_set_context_state();
 

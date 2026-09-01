@@ -2,6 +2,7 @@
 #include "WiiUImpl.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/iosupport.h>
 
@@ -143,13 +144,41 @@ static void UpdateKPADProButton(KPADStatus* status, SDL_GameController* controll
 void Update() {
     SDL_PumpEvents();
 
-    bool updateControllers = false;
+    // [port] Nothing here ever dequeued SDL events. The GamePad's sticks emit
+    // axis motion continuously, so the queue grew without bound: ~50MB of heap
+    // over a couple of minutes, and SDL_PumpEvents walking an ever longer queue
+    // took this function from 0.004ms to 10ms a call - which is the frame rate
+    // decaying and never recovering. Drain everything except the
+    // controller-device range, which libultraship's own handler consumes to
+    // register the pad. gfx_sdl2 does exactly this; the Wii U path never did.
+    {
+        SDL_Event drained;
+        while (SDL_PeepEvents(&drained, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_CONTROLLERDEVICEADDED - 1) > 0) {
+        }
+        while (SDL_PeepEvents(&drained, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEREMOVED + 1, SDL_LASTEVENT) > 0) {
+        }
+    }
+
+    // [port] This used to declare a local of the same name, shadowing the file
+    // scope flag that Init() sets. The enumeration Init() asked for therefore
+    // never ran, and controllers were only picked up if an SDL device-added event
+    // arrived afterwards - but the GamePad is already connected before the event
+    // loop starts, so that event had come and gone and no pad was ever opened.
+    // Peek, never consume: libultraship's SDLAddRemoveDeviceEventHandler needs
+    // these same events to register the physical device and build its default
+    // mappings, and this runs first each frame. Taking them with SDL_GETEVENT
+    // meant the pad opened here while the control deck never learned it existed,
+    // so nothing reached the game. gfx_sdl2 steps around this range for the same
+    // reason.
     SDL_Event event;
-    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_CONTROLLERDEVICEADDED, SDL_CONTROLLERDEVICEREMOVED) > 0) {
+    if (SDL_PeepEvents(&event, 1, SDL_PEEKEVENT, SDL_CONTROLLERDEVICEADDED, SDL_CONTROLLERDEVICEREMOVED) > 0) {
         updateControllers = true;
     }
 
     if (updateControllers) {
+        for (auto& [index, controller] : controllers) {
+            SDL_GameControllerClose(controller);
+        }
         controllers.clear();
         hasVpad = false;
 
@@ -159,6 +188,11 @@ void Update() {
                 SDL_GameController* controller = SDL_GameControllerOpen(i);
                 if (controller) {
                     int playerIndex = SDL_GameControllerGetPlayerIndex(controller);
+                    if (playerIndex < 0) {
+                        // The Wii U SDL port does not always assign a player index.
+                        // Index 0 is the GamePad, so fall back to insertion order.
+                        playerIndex = (int)controllers.size();
+                    }
                     if (playerIndex == 0) {
                         hasVpad = true;
                     }
@@ -167,22 +201,61 @@ void Update() {
                 }
             }
         }
+
+        // Name each device and its player index: that is what decides which
+        // virtual port it drives, and it is the first thing worth knowing when a
+        // Pro Controller or a Wiimote does not respond.
+        WHBLogPrintf("[input] %d joysticks, %u opened, vpad=%d", numJoysticks, (unsigned)controllers.size(),
+                     (int)hasVpad);
+        for (int i = 0; i < numJoysticks; i++) {
+            const char* jname = SDL_JoystickNameForIndex(i);
+            if (SDL_IsGameController(i)) {
+                SDL_GameController* c = SDL_GameControllerFromInstanceID(
+                    SDL_JoystickGetDeviceInstanceID(i));
+                WHBLogPrintf("[input]   %d: '%s' controller='%s' player=%d", i, jname ? jname : "?",
+                             c ? (SDL_GameControllerName(c) ? SDL_GameControllerName(c) : "?") : "not open",
+                             c ? SDL_GameControllerGetPlayerIndex(c) : -1);
+            } else {
+                WHBLogPrintf("[input]   %d: '%s' (not a game controller - needs a mapping)", i,
+                             jname ? jname : "?");
+            }
+        }
+
+        // Keep retrying while nothing has been opened yet: at startup SDL may not
+        // have enumerated the pad, and without a retry we would never look again.
+        updateControllers = controllers.empty();
     }
 
-    // Reconstruct VPAD/KPAD from SDL input
-    // This is somewhat hacky, but we can't call VPADRead again or we steal inputs from SDL
-    // for (auto& [index, controller] : controllers) {
-    //     if (index == 0) {
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_A,        SDL_CONTROLLER_BUTTON_A);
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_B,        SDL_CONTROLLER_BUTTON_B);
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_X,        SDL_CONTROLLER_BUTTON_X);
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_Y,        SDL_CONTROLLER_BUTTON_Y);
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_PLUS,     SDL_CONTROLLER_BUTTON_START);
-    //         UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_MINUS,    SDL_CONTROLLER_BUTTON_BACK);
-    //     } else {
+    // [port] Rebuild the VPAD button state from SDL. This is what feeds ImGui:
+    // the Wii U ImGui backend reads vpadStatus.hold, and with this disabled it saw
+    // a controller on which no button was ever pressed - which is why the
+    // enhancements menu could not be opened on console at all. Synthesising from
+    // SDL is safe; the warning above is about calling VPADRead a second time,
+    // which would take the sample away from SDL. Nothing here touches VPADRead.
+    for (auto& [index, controller] : controllers) {
+        if (index != 0 || controller == nullptr) {
+            continue;
+        }
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_A, SDL_CONTROLLER_BUTTON_A);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_B, SDL_CONTROLLER_BUTTON_B);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_X, SDL_CONTROLLER_BUTTON_X);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_Y, SDL_CONTROLLER_BUTTON_Y);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_PLUS, SDL_CONTROLLER_BUTTON_START);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_MINUS, SDL_CONTROLLER_BUTTON_BACK);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_UP, SDL_CONTROLLER_BUTTON_DPAD_UP);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_L, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_R, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
 
-    //     }
-    // }
+        // Sticks, so menu navigation works without the d-pad.
+        vpadStatus.leftStick.x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
+        vpadStatus.leftStick.y = -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
+        vpadStatus.rightStick.x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+        vpadStatus.rightStick.y = -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+
+    }
 
     if (hasVpad) {
         vpadStatus.tpNormal.touched = false;
@@ -196,8 +269,36 @@ void Update() {
                 if (finger) {
                     vpadStatus.tpNormal.touched = true;
                     vpadStatus.tpNormal.validity = VPAD_VALID;
-                    vpadStatus.tpNormal.x = finger->x * 1280;
-                    vpadStatus.tpNormal.y = finger->y * 720;
+                    // [port] tpNormal holds RAW panel coordinates on hardware, and
+                    // consumers calibrate it. Writing screen pixels here worked for
+                    // the ImGui path only because that path skipped calibration;
+                    // the system keyboard calls VPADGetTPCalibratedPoint itself, so
+                    // it read 0..1280 as a raw value and every tap collapsed into
+                    // one corner. Supply the raw range and let each consumer
+                    // calibrate, as on real hardware.
+                    // The panel's raw Y runs the opposite way to screen Y - its
+                    // origin is at the bottom - and VPADGetTPCalibratedPoint flips
+                    // it back. Feeding SDL's downward-increasing Y straight in came
+                    // out upside down: taps at the top registered at the bottom.
+                    vpadStatus.tpNormal.x = (uint16_t)(finger->x * 4096.0f);
+                    vpadStatus.tpNormal.y = (uint16_t)((1.0f - finger->y) * 4096.0f);
+
+                    { // [touchdiag] report only new extremes, so four corner taps
+                      // give the usable range rather than 30 samples of one press
+                        static float minX = 9.0f, maxX = -9.0f, minY = 9.0f, maxY = -9.0f;
+                        bool grew = false;
+                        if (finger->x < minX) { minX = finger->x; grew = true; }
+                        if (finger->x > maxX) { maxX = finger->x; grew = true; }
+                        if (finger->y < minY) { minY = finger->y; grew = true; }
+                        if (finger->y > maxY) { maxY = finger->y; grew = true; }
+                        if (grew) {
+                            WHBLogPrintf("[touchdiag] range x %.4f..%.4f  y %.4f..%.4f"
+                                         "  (this %.4f,%.4f -> tp=%u,%u)",
+                                         minX, maxX, minY, maxY, finger->x, finger->y,
+                                         (unsigned)vpadStatus.tpNormal.x,
+                                         (unsigned)vpadStatus.tpNormal.y);
+                        }
+                    }
                 }
             }
         }

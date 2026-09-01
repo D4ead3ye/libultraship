@@ -94,8 +94,9 @@ void Gui::Init() {
         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
     }
 
-    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
-        GetMenuOrMenubarVisible()) {
+    // See UpdateGamepadNavigation: nav has to be live before a menu exists, or
+    // the pad can never open one.
+    if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0)) {
         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     } else {
         mImGuiIo->ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
@@ -174,9 +175,13 @@ void Gui::RefreshImGuiGamepads() {
 }
 
 void Gui::UpdateGamepadNavigation() {
-    const bool navWanted = Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0) &&
-                           (GetMenuOrMenubarVisible() ||
-                            ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel));
+    // [port] Nav used to be enabled only once a menu was already on screen. On a
+    // console that is circular: ImGui's SDL backend does not feed gamepad keys
+    // unless nav is on, so IsKeyPressed(GamepadBack) never fired and the menu
+    // could not be opened at all - every setting needed the config file edited by
+    // hand. Keep nav on whenever the user has controller navigation enabled, so
+    // the toggle button is always seen.
+    const bool navWanted = Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_IMGUI_CONTROLLER_NAV, 0);
     if (navWanted) {
         mImGuiIo->ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     } else {
@@ -187,6 +192,17 @@ void Gui::UpdateGamepadNavigation() {
 void Gui::DrawMenu() {
     // Per frame: popups (boot prompts, the file browser) have no open/close event to hook.
     UpdateGamepadNavigation();
+
+    { // [menudiag] report visibility transitions and whether a menu object exists
+        static int lastVis = -1;
+        const int vis = GetMenuOrMenubarVisible() ? 1 : 0;
+        if (vis != lastVis) {
+            lastVis = vis;
+            SPDLOG_WARN("[menudiag] menuVisible={} hasMenu={} hasMenuBar={} navFlag={}", vis, GetMenu() != nullptr,
+                        GetMenuBar() != nullptr,
+                        (mImGuiIo->ConfigFlags & ImGuiConfigFlags_NavEnableGamepad) != 0);
+        }
+    }
 
     const std::shared_ptr<Window> wnd = Context::GetRawInstance()->GetWindow();
     const std::shared_ptr<Config> conf = Context::GetRawInstance()->GetConfig();

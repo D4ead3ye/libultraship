@@ -1,3 +1,5 @@
+#pragma once
+
 /**
  * @file Api.h
  * @brief API export/import macros for cross-platform shared library symbol visibility.

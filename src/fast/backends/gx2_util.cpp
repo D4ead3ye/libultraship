@@ -100,7 +100,13 @@ bool GX2Util::Init()
     WHBGfxInitShaderAttribute(&convShader, "Position", 0, 0, GX2_ATTRIB_FORMAT_FLOAT_32_32);
     WHBGfxInitFetchShader(&convShader);
 
-    GX2InitSampler(&sampler, GX2_TEX_CLAMP_MODE_WRAP, GX2_TEX_XY_FILTER_MODE_POINT);
+    // [port] This sampler only ever serves ConvertSurface, which resolves the
+    // 1280x720 render target down to the game's native 320x240 readback buffer.
+    // Point sampling there keeps 1 pixel in 16 and aliases badly - visible as a
+    // coarse, sparkly image in the effects that read the framebuffer back, such
+    // as the intro circle. Linear averages the footprint instead. Clamp rather
+    // than wrap so the edges do not pull in the opposite side of the screen.
+    GX2InitSampler(&sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_LINEAR);
 
     return true;
 }

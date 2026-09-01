@@ -1,3 +1,5 @@
+#pragma once
+
 //
 //  gfx_metal.h
 //  libultraship

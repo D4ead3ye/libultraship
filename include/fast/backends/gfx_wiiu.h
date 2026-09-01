@@ -7,8 +7,16 @@
 #include "gfx_window_manager_api.h"
 
 // make the default fb always 1080p to not mess with scaling
-#define WIIU_DEFAULT_FB_WIDTH 1920
-#define WIIU_DEFAULT_FB_HEIGHT 1080
+// [port] 1080p is 2.25x the pixels of 720p and Latte cannot sustain it here:
+// measured ~22fps rendered, which starved the game loop down to 20-25Hz logic
+// against its intended 30Hz. 720p is also the panel's native TV mode and well
+// above the GamePad's 854x480, so nothing is actually resolved away.
+// The GamePad panel is fixed at this size regardless of the render resolution.
+#define WIIU_DRC_WIDTH 854
+#define WIIU_DRC_HEIGHT 480
+
+#define WIIU_DEFAULT_FB_WIDTH 1280
+#define WIIU_DEFAULT_FB_HEIGHT 720
 
 namespace Fast {
 

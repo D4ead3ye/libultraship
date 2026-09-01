@@ -1,3 +1,5 @@
+#pragma once
+
 #include "ship/controller/controldevice/controller/mapping/ControllerLEDMapping.h"
 #include "SDLMapping.h"
 

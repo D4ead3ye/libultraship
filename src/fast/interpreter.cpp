@@ -117,6 +117,10 @@ static std::string GetPathWithoutFileName(char* filePath) {
 constexpr size_t MAX_TRI_BUFFER = 256;
 
 #ifdef __WIIU__
+// Bring-up instrumentation. The renderer is working now, so this is off by
+// default: left in place because it is what localised the vertex ring race, but
+// it produced ~3000 lines a session and evicted everything else from the log.
+#define WIIU_VERBOSE_GFX_LOG 0
 // Bring-up instrumentation: which gate is dropping the scene's geometry.
 static uint32_t sTriIn = 0;      // entered GfxSpTri1
 static uint32_t sTriClipped = 0; // all three vertices outside one plane
@@ -127,6 +131,69 @@ static uint32_t sVtxRejAll = 0;  // transformed vertices with a clip_rej set
 static uint32_t sCmds = 0;       // display list commands executed
 static uint32_t sVtxCmds = 0;    // G_VTX commands
 static uint32_t sDlCmds = 0;     // nested display list calls
+static uint32_t sTexZeroDim = 0; // tile resolved to a zero width/height
+static uint32_t sVtxBad = 0;     // packed a non-finite position
+static uint32_t sTriBehind = 0;  // at least one vertex at or behind the eye
+static uint32_t sTriHuge = 0;    // covers several times the whole screen
+// Screen coverage buckets. The whole screen is 2x2 = 4.0 in NDC, so the previous
+// "> 16" probe could not see a triangle covering the entire display.
+static uint32_t sMtxPushLost = 0; // push past the 11 deep stack, silently dropped
+static uint32_t sMtxPopUnder = 0; // pop with nothing left to pop
+static uint32_t sMtxMaxDepth = 0; // deepest the stack actually went
+static uint32_t sVtxOOB = 0;     // G_VTX writing past the 64 slot array
+static uint32_t sVtxWildBatch = 0; // a vertex batch that is not spatially coherent
+static uint32_t sTriLong = 0;      // one vertex far off screen: the wedge shape
+static float sBigNRArea = 0.0f;   // biggest non-rect triangle: rects masked these
+static uint64_t sBigNRId = 0;
+static float sBigNRX0, sBigNRX1, sBigNRY0, sBigNRY1;
+static uint32_t sBigNRCmd = 0;
+static uint32_t sTriClipEmitted = 0; // triangles produced by clipping
+static uint32_t sTriClipDropped = 0; // fully outside, clipped away
+static bool sClipReentry = false;
+static const float kClipMinW = 0.05f;
+
+struct ClipVtx {
+    float x, y, z, w, u, v, r, g, b, a;
+};
+
+// Signed distance to each plane, positive inside.
+static inline float ClipDist(const ClipVtx& p, int plane) {
+    switch (plane) {
+        case 0: return p.w - kClipMinW;
+        case 1: return p.x + p.w;
+        case 2: return p.w - p.x;
+        case 3: return p.y + p.w;
+        default: return p.w - p.y;
+    }
+}
+
+static inline ClipVtx ClipLerp(const ClipVtx& a, const ClipVtx& b, float t) {
+    ClipVtx o;
+    o.x = a.x + (b.x - a.x) * t;
+    o.y = a.y + (b.y - a.y) * t;
+    o.z = a.z + (b.z - a.z) * t;
+    o.w = a.w + (b.w - a.w) * t;
+    o.u = a.u + (b.u - a.u) * t;
+    o.v = a.v + (b.v - a.v) * t;
+    o.r = a.r + (b.r - a.r) * t;
+    o.g = a.g + (b.g - a.g) * t;
+    o.b = a.b + (b.b - a.b) * t;
+    o.a = a.a + (b.a - a.a) * t;
+    return o;
+}
+static uint32_t sLongLogged = 0;
+static uint32_t sLongFirstCmd = 0;
+static uint32_t sLongLastCmd = 0;
+static uint32_t sBigFirstCmd = 0;  // command index of the first screen sized triangle
+static uint32_t sBigLastCmd = 0;   // and of the last one
+static uint32_t sTriStale = 0;   // triangle read a slot no G_VTX ever filled
+static uint8_t sVtxSlotWritten[MAX_VERTICES + 4];
+static uint32_t sTriQuarter = 0; // over a quarter of the screen
+static uint32_t sTriFull = 0;    // over the whole screen
+static float sBigArea = 0.0f;    // largest this frame, with its provenance
+static uint64_t sBigId = 0;
+static float sBigX0, sBigX1, sBigY0, sBigY1;
+static int sBigRect = 0, sBigUsedTex = 0, sBigBoundTex = 0;
 #endif
 
 Interpreter::Interpreter() {
@@ -1539,6 +1606,11 @@ void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
     } else { // G_MTX_MODELVIEW
         if ((parameters & mtx_push) && mRsp->modelview_matrix_stack_size < 11) {
             ++mRsp->modelview_matrix_stack_size;
+#ifdef __WIIU__
+            if (mRsp->modelview_matrix_stack_size > sMtxMaxDepth) {
+                sMtxMaxDepth = mRsp->modelview_matrix_stack_size;
+            }
+#endif
             memcpy(mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1],
                    mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 2], sizeof(matrix));
         }
@@ -1556,6 +1628,11 @@ void Interpreter::GfxSpMatrix(uint8_t parameters, const int32_t* addr) {
 }
 
 void Interpreter::GfxSpPopMatrix(uint32_t count) {
+#ifdef __WIIU__
+    if (mRsp->modelview_matrix_stack_size <= count) {
+        sMtxPopUnder++;
+    }
+#endif
     while (count--) {
         if (mRsp->modelview_matrix_stack_size > 0) {
             --mRsp->modelview_matrix_stack_size;
@@ -1594,9 +1671,6 @@ void Interpreter::AdjustWidthHeightForScale(uint32_t& width, uint32_t& height, u
 }
 
 void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx* vertices) {
-#ifdef __WIIU__
-    sVtxCmds++;
-#endif
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const F3DVtx_t* v = &vertices[i].v;
         const F3DVtx_tn* vn = &vertices[i].n;
@@ -1614,6 +1688,7 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
                   v->ob[2] * mRsp->MP_matrix[2][2] + mRsp->MP_matrix[3][2];
         float w = v->ob[0] * mRsp->MP_matrix[0][3] + v->ob[1] * mRsp->MP_matrix[1][3] +
                   v->ob[2] * mRsp->MP_matrix[2][3] + mRsp->MP_matrix[3][3];
+
 
         float world_pos[3] = { 0.0 };
         if (mRsp->geometry_mode & G_LIGHTING_POSITIONAL) {
@@ -1823,6 +1898,110 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
 #endif
         return;
     }
+
+#ifdef __WIIU__
+    // [port] Fast3D deliberately does not clip triangles to the frustum: every
+    // other backend lets the GPU do it. Latte does not, so a triangle running
+    // from near the camera to the horizon (w=1.5 against w=1030, one corner
+    // projecting to x=828, i.e. 414 screens out) reaches the rasteriser with
+    // coordinates far outside its usable range and comes out as a wedge with
+    // garbage interpolation. Clip it here, the way the RSP did.
+    //
+    // Only triangles that actually leave the frustum take this path - a handful
+    // per frame - so the cost is negligible.
+    if (!is_rect && !sClipReentry) {
+        bool needsClip = false;
+        for (int i = 0; i < 3; i++) {
+            const float vw = v_arr[i]->w;
+            if (vw <= kClipMinW || fabsf(v_arr[i]->x) > vw || fabsf(v_arr[i]->y) > vw) {
+                needsClip = true;
+                break;
+            }
+        }
+        if (needsClip) {
+            ClipVtx poly[16], tmp[16];
+            int n = 3;
+            for (int i = 0; i < 3; i++) {
+                poly[i].x = v_arr[i]->x;
+                poly[i].y = v_arr[i]->y;
+                poly[i].z = v_arr[i]->z;
+                poly[i].w = v_arr[i]->w;
+                poly[i].u = v_arr[i]->u;
+                poly[i].v = v_arr[i]->v;
+                poly[i].r = v_arr[i]->color.r;
+                poly[i].g = v_arr[i]->color.g;
+                poly[i].b = v_arr[i]->color.b;
+                poly[i].a = v_arr[i]->color.a;
+            }
+
+            // w > kClipMinW first, so the side planes never divide by ~0.
+            for (int plane = 0; plane < 5 && n >= 3; plane++) {
+                int m = 0;
+                for (int i = 0; i < n; i++) {
+                    const ClipVtx& cur = poly[i];
+                    const ClipVtx& nxt = poly[(i + 1) % n];
+                    const float dc = ClipDist(cur, plane);
+                    const float dn = ClipDist(nxt, plane);
+                    if (dc >= 0.0f) {
+                        tmp[m++] = cur;
+                    }
+                    if ((dc >= 0.0f) != (dn >= 0.0f) && m < 16) {
+                        const float t = dc / (dc - dn);
+                        tmp[m++] = ClipLerp(cur, nxt, t);
+                    }
+                    if (m >= 15) {
+                        break;
+                    }
+                }
+                n = m;
+                for (int i = 0; i < n; i++) {
+                    poly[i] = tmp[i];
+                }
+            }
+
+            if (n >= 3) {
+                sClipReentry = true;
+                sTriClipEmitted += (uint32_t)(n - 2);
+                for (int i = 1; i + 1 < n; i++) {
+                    const int idx[3] = { 0, i, i + 1 };
+                    for (int k = 0; k < 3; k++) {
+                        struct LoadedVertex* d = &mRsp->loaded_vertices[MAX_VERTICES + k];
+                        const ClipVtx& sv = poly[idx[k]];
+                        d->x = sv.x;
+                        d->y = sv.y;
+                        d->z = sv.z;
+                        d->w = sv.w;
+                        d->u = sv.u;
+                        d->v = sv.v;
+                        d->color.r = (uint8_t)(sv.r < 0.0f ? 0.0f : (sv.r > 255.0f ? 255.0f : sv.r));
+                        d->color.g = (uint8_t)(sv.g < 0.0f ? 0.0f : (sv.g > 255.0f ? 255.0f : sv.g));
+                        d->color.b = (uint8_t)(sv.b < 0.0f ? 0.0f : (sv.b > 255.0f ? 255.0f : sv.b));
+                        d->color.a = (uint8_t)(sv.a < 0.0f ? 0.0f : (sv.a > 255.0f ? 255.0f : sv.a));
+                        d->clip_rej = 0;
+                    }
+                    GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 2, false);
+                }
+                sClipReentry = false;
+            } else {
+                sTriClipDropped++;
+            }
+            return;
+        }
+    }
+
+    // [port] A vertex that came out non-finite projects to infinity and smears
+    // its triangle across the whole screen, hiding everything drawn under it.
+    // Such a triangle can never be drawn correctly, so drop it and count it.
+    for (int i = 0; i < 3; i++) {
+        if (!isfinite(v_arr[i]->x) || !isfinite(v_arr[i]->y) || !isfinite(v_arr[i]->z) || !isfinite(v_arr[i]->w)) {
+            if (sVtxBad++ == 0) {
+                WHBLogPrintf("[f3d] non-finite vertex: %f %f %f %f (rect=%d)", v_arr[i]->x, v_arr[i]->y, v_arr[i]->z,
+                             v_arr[i]->w, (int)is_rect);
+            }
+            return;
+        }
+    }
+#endif
 
     const uint32_t cull_both = get_attr(CULL_BOTH);
     const uint32_t cull_front = get_attr(CULL_FRONT);
@@ -2077,6 +2256,20 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
                 tex_height[i] = tex_height2[i];
             }
 
+            // [port] A zero dimension makes the texcoord divides below evaluate
+            // to infinity, and one infinite vertex stretches its triangle across
+            // the whole screen. tex_height is a plain integer divide and
+            // tex_width is halved again for 16-bit tiles, so either reaches zero
+            // whenever a texture reports a zero size.
+            if (tex_width[i] == 0 || tex_height[i] == 0) {
+                if (tex_width[i] == 0) {
+                    tex_width[i] = 1;
+                }
+                if (tex_height[i] == 0) {
+                    tex_height[i] = 1;
+                }
+            }
+
             uint32_t tex_width1 = tex_width[i] << (cms & G_TX_MIRROR);
             uint32_t tex_height1 = tex_height[i] << (cmt & G_TX_MIRROR);
 
@@ -2133,6 +2326,8 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     mRapi->ShaderGetInfo(prg, &numInputs, usedTextures);
 
     struct GfxClipParameters clip_parameters = mRapi->GetClipParameters();
+
+
 
     for (int i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
@@ -2875,6 +3070,9 @@ void Interpreter::GfxDrawRectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_
 
     ulxf = AdjXForAspectRatio(ulxf);
     lrxf = AdjXForAspectRatio(lrxf);
+
+
+
 
     struct LoadedVertex* ul = &mRsp->loaded_vertices[MAX_VERTICES + 0];
     struct LoadedVertex* ll = &mRsp->loaded_vertices[MAX_VERTICES + 1];
@@ -5121,18 +5319,6 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
-#ifdef __WIIU__
-    {
-        static uint32_t frames = 0;
-        if ((frames % 60) == 0) {
-            WHBLogPrintf("[f3d] tris in=%u rect=%u clipped=%u culled=%u | vtx=%u rej=%u | cmds=%u vtxcmd=%u",
-                         sTriIn, sTriRect, sTriClipped, sTriCulled, sVtxLoaded, sVtxRejAll, sCmds, sVtxCmds);
-        }
-        frames++;
-        sTriIn = sTriRect = sTriClipped = sTriCulled = sVtxLoaded = sVtxRejAll = 0;
-        sCmds = sVtxCmds = sDlCmds = 0;
-    }
-#endif
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {
@@ -5326,6 +5512,7 @@ int Interpreter::CreateFrameBuffer(uint32_t width, uint32_t height, uint32_t nat
     mFrameBuffers[fb] = {
         orig_width, orig_height, width, height, native_width, native_height, static_cast<bool>(resize), forceFixedAspect
     };
+
     return fb;
 }
 

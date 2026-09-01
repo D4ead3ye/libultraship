@@ -1,3 +1,5 @@
+#pragma once
+
 /**
  * @brief Font Awesome 4.x icon codepoint definitions for C/C++.
  *

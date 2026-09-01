@@ -1,3 +1,5 @@
+#pragma once
+
 /**
  * @file CoreEvents.h
  * @brief Convenience header that pulls in the complete event system for core event definitions.

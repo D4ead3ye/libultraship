@@ -5,6 +5,7 @@
 
 #ifdef __WIIU__
 #include <gx2/registers.h> // GX2SetViewport / GX2SetScissor
+#include <whb/log.h> // [menudiag]
 #include <ship/port/wiiu/ImGui/imgui_impl_gx2.h>
 #include <ship/port/wiiu/ImGui/imgui_impl_wiiu.h>
 #include "fast/backends/gfx_wiiu.h"
@@ -90,6 +91,16 @@ void Fast3dGui::HandleWindowEvents(Fast::WindowEvent event) {
         case WindowBackend::FAST3D_DXGI_DX11:
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(event.Win32.Handle), event.Win32.Msg, event.Win32.Param1,
                                            event.Win32.Param2);
+            break;
+#endif
+#ifdef __WIIU__
+        case WindowBackend::FAST3D_WIIU_GX2:
+            // [port] The Wii U backend builds a VPAD/KPAD snapshot every frame and
+            // hands it over here, but there was no case for it, so it was dropped
+            // and ImGui never saw a single button. That is why the menu could not
+            // be opened on console: the toggle is ImGuiKey_GamepadBack, and no
+            // gamepad key ever reached ImGui to press it.
+            ImGui_ImplWiiU_ProcessInput(static_cast<const ImGui_ImplWiiU_ControllerInput*>(event.Gx2.Input));
             break;
 #endif
         default:
@@ -222,11 +233,32 @@ void Fast3dGui::ImGuiBackendShutdown() {
 void Fast3dGui::ImGuiBackendNewFrame() {
     switch (mImpl.Backend) {
 #ifdef __WIIU__
-        case WindowBackend::FAST3D_WIIU_GX2:
+        case WindowBackend::FAST3D_WIIU_GX2: {
             // GX2 has no SDL frame pacing to borrow a delta from
-            ImGui::GetIO().DeltaTime = (float)frametime / 1000.0f / 1000.0f;
+            ImGuiIO& gx2Io = ImGui::GetIO();
+            gx2Io.DeltaTime = (float)frametime / 1000.0f / 1000.0f;
+
+            // [port] Nothing on this backend ever set DisplaySize, so it kept
+            // ImGui's constructor default of (-1,-1). ImGui_ImplGX2_RenderDrawData
+            // returns early when the framebuffer size is <= 0, so the overlay
+            // never drew a single pixel - the menu opened and took input, but was
+            // invisible. The SDL and DX backends get this from their own NewFrame.
+            const auto gx2Wnd = Ship::Context::GetRawInstance()->GetWindow();
+            const uint32_t gx2W = gx2Wnd ? gx2Wnd->GetWidth() : 0;
+            const uint32_t gx2H = gx2Wnd ? gx2Wnd->GetHeight() : 0;
+            gx2Io.DisplaySize = ImVec2((float)(gx2W ? gx2W : 1280), (float)(gx2H ? gx2H : 720));
+            gx2Io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+
+            // [port] Menu navigation is driven by held buttons sampled every frame.
+            // At 60fps ImGui's defaults (0.275s then 20/sec) run the cursor far
+            // faster than anyone can aim on a virtual keyboard. Slow the repeat to
+            // something usable from a couch.
+            gx2Io.KeyRepeatDelay = 0.40f;
+            gx2Io.KeyRepeatRate = 0.14f;
+
             ImGui_ImplGX2_NewFrame();
             break;
+        }
 #endif
 
 #ifdef ENABLE_OPENGL
@@ -283,6 +315,16 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
     switch (mImpl.Backend) {
 #ifdef __WIIU__
         case WindowBackend::FAST3D_WIIU_GX2: {
+            { // [menudiag] is ImGui actually producing geometry, and at what size?
+                static int n = 0;
+                if (data != nullptr && data->CmdListsCount > 0 && n < 10) {
+                    n++;
+                    ImGuiIO& dio = ImGui::GetIO();
+                    WHBLogPrintf("[menudiag] draw lists=%d vtx=%d idx=%d display=%.0fx%.0f fbScale=%.2f",
+                                 data->CmdListsCount, data->TotalVtxCount, data->TotalIdxCount, dio.DisplaySize.x,
+                                 dio.DisplaySize.y, dio.DisplayFramebufferScale.x);
+                }
+            }
             ImGui_ImplGX2_RenderDrawData(data);
 
             // Reset viewport and scissor for drawing the keyboard
