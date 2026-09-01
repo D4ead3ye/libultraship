@@ -297,7 +297,13 @@ static void ImGui_ImplWiiU_UpdateControllerInput(const ImGui_ImplWiiU_Controller
 
     io.AddKeyEvent(ImGuiKey_GamepadStart, (vpad_buttons & VPAD_BUTTON_PLUS) || (wpad_buttons & WPAD_BUTTON_PLUS) || (classic_buttons & WPAD_CLASSIC_BUTTON_PLUS) || (pro_buttons & WPAD_PRO_BUTTON_PLUS));
     io.AddKeyEvent(ImGuiKey_GamepadBack, (vpad_buttons & VPAD_BUTTON_MINUS) || (wpad_buttons & WPAD_BUTTON_MINUS) || (classic_buttons & WPAD_CLASSIC_BUTTON_MINUS) || (pro_buttons & WPAD_PRO_BUTTON_MINUS));
-    io.AddKeyEvent(ImGuiKey_GamepadFaceLeft, (vpad_buttons & VPAD_BUTTON_X) || (classic_buttons & WPAD_CLASSIC_BUTTON_X) || (pro_buttons & WPAD_PRO_BUTTON_X));
+    // [port] Deliberately not fed. ImGui treats GamepadFaceLeft as NavMenu, which
+    // opens its gamepad window-switcher overlay while the button is held - a grey
+    // box listing the open windows. There is exactly one ("Main Game", docked to
+    // the central node with no tab bar), so the overlay can only ever offer the
+    // window the player is already looking at, and holding X in-game showed it
+    // over the running game. Nothing else in the menu binds NavMenu.
+    io.AddKeyEvent(ImGuiKey_GamepadFaceLeft, false);
     io.AddKeyEvent(ImGuiKey_GamepadFaceRight, (vpad_buttons & VPAD_BUTTON_B) || (wpad_buttons & WPAD_BUTTON_B) || (classic_buttons & WPAD_CLASSIC_BUTTON_B) || (pro_buttons & WPAD_PRO_BUTTON_B));
     io.AddKeyEvent(ImGuiKey_GamepadFaceUp, (vpad_buttons & VPAD_BUTTON_Y) || (classic_buttons & WPAD_CLASSIC_BUTTON_Y) || (pro_buttons & WPAD_PRO_BUTTON_Y));
     io.AddKeyEvent(ImGuiKey_GamepadFaceDown, (vpad_buttons & VPAD_BUTTON_A) || (wpad_buttons & WPAD_BUTTON_A) || (classic_buttons & WPAD_CLASSIC_BUTTON_A) || (pro_buttons & WPAD_PRO_BUTTON_A));
