@@ -277,7 +277,12 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
     // captures, which are read back as textures and would need their own
     // resolve for no visible gain.
     buffer->color_buffer.surface.aa = (buffer == &framebuffers[0]) ? gfx_gx2_aa_mode() : GX2_AA_MODE1X;
-    buffer->color_buffer.surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    // A multisampled target has to be tiled: linear forces the GPU down a slow
+    // path, measured at ~2fps with an otherwise working 2x setup. The resolve
+    // surface stays linear, since that is the one read back and presented.
+    buffer->color_buffer.surface.tileMode = (buffer->color_buffer.surface.aa == GX2_AA_MODE1X)
+                                                ? GX2_TILE_MODE_LINEAR_ALIGNED
+                                                : GX2_TILE_MODE_DEFAULT;
     buffer->color_buffer.viewNumSlices = 1;
 
     memset(&buffer->depth_buffer, 0, sizeof(GX2DepthBuffer));
