@@ -135,7 +135,12 @@ static struct GX2TextureObj* current_textures[SHADER_MAX_TEXTURES];
 // buffer directly - both need a resolve first - so a plain 1x surface sits
 // beside it and everything downstream reads that.
 static uint32_t sMsaaSamples = 0;          // 0 = off, else 2
-static GX2Surface sResolveSurface = {};
+// A real GX2ColorBuffer, not a bare surface. The first attempt resolved into a
+// loose GX2Surface and then built a colour buffer around it per frame by copying
+// the AA one and swapping its surface - that rendered at full speed and showed
+// nothing. Its registers describe the surface they were built from, so they have
+// to be initialised once, here, from this surface.
+static GX2ColorBuffer sResolveBuffer = {};
 static bool sResolveValid = false;
 
 static GX2AAMode gfx_gx2_aa_mode() {
@@ -241,26 +246,32 @@ static bool gfx_gx2_alloc_resolve(uint32_t width, uint32_t height) {
     if (sMsaaSamples < 2) {
         return true;
     }
-    memset(&sResolveSurface, 0, sizeof(sResolveSurface));
-    sResolveSurface.use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
-    sResolveSurface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
-    sResolveSurface.width = width;
-    sResolveSurface.height = height;
-    sResolveSurface.depth = 1;
-    sResolveSurface.mipLevels = 1;
-    sResolveSurface.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
-    sResolveSurface.aa = GX2_AA_MODE1X;
-    sResolveSurface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
-    GX2CalcSurfaceSizeAndAlignment(&sResolveSurface);
-    sResolveSurface.image = gfx_wiiu_alloc_mem1(sResolveSurface.imageSize, sResolveSurface.alignment);
-    if (sResolveSurface.image == nullptr) {
-        WHBLogPrintf("[gfx_gx2] !! MSAA resolve surface alloc failed (%u bytes)",
-                     (unsigned)sResolveSurface.imageSize);
+    memset(&sResolveBuffer, 0, sizeof(sResolveBuffer));
+    GX2Surface& s = sResolveBuffer.surface;
+    s.use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
+    s.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    s.width = width;
+    s.height = height;
+    s.depth = 1;
+    s.mipLevels = 1;
+    s.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+    s.aa = GX2_AA_MODE1X;
+    s.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    sResolveBuffer.viewNumSlices = 1;
+    GX2CalcSurfaceSizeAndAlignment(&s);
+    s.image = gfx_wiiu_alloc_mem1(s.imageSize, s.alignment);
+    if (s.image == nullptr) {
+        WHBLogPrintf("[gfx_gx2] !! MSAA resolve surface alloc failed (%u bytes)", (unsigned)s.imageSize);
         return false;
     }
+    // After the image, not before: the registers encode the base address, so
+    // building them against a null image is a buffer pointing at nothing - which
+    // presents as a black screen at a perfectly healthy 60fps. The framebuffer
+    // setup above happens to get away with the other order; this does not.
+    GX2InitColorBufferRegs(&sResolveBuffer);
     sResolveValid = true;
-    WHBLogPrintf("[gfx_gx2] MSAA resolve surface %u bytes, mem1free=%u",
-                 (unsigned)sResolveSurface.imageSize, (unsigned)gfx_wiiu_mem1_free());
+    WHBLogPrintf("[gfx_gx2] MSAA resolve surface %u bytes at %p, mem1free=%u",
+                 (unsigned)s.imageSize, s.image, (unsigned)gfx_wiiu_mem1_free());
     return true;
 }
 
@@ -1096,18 +1107,15 @@ void GfxRenderingAPIGX2::EndFrame(void) {
 
     Framebuffer& main_framebuffer = framebuffers[0];
 
-    // Multi-sampled data cannot go straight to a scan buffer: resolve it down
-    // first and present that instead.
+    // [port] Presenting the multisampled buffer directly does put an image up,
+    // but a tiled AA surface has a different pitch to the 1x one the scan copy
+    // scales against, so the picture lands offset - and anything sampling the
+    // framebuffer as a texture reads the raw samples and comes out streaked.
+    // Resolve into a plain 1x buffer and present that.
     const GX2ColorBuffer* present = &main_framebuffer.color_buffer;
-    GX2ColorBuffer resolved;
     if (sMsaaSamples >= 2 && sResolveValid) {
-        GX2ResolveAAColorBuffer(&main_framebuffer.color_buffer, &sResolveSurface, 0, 0);
-        resolved = main_framebuffer.color_buffer;
-        resolved.surface = sResolveSurface;
-        resolved.aaBuffer = nullptr;
-        resolved.aaSize = 0;
-        GX2InitColorBufferRegs(&resolved);
-        present = &resolved;
+        GX2ResolveAAColorBuffer(&main_framebuffer.color_buffer, &sResolveBuffer.surface, 0, 0);
+        present = &sResolveBuffer;
     }
     GX2CopyColorBufferToScanBuffer(present, GX2_SCAN_TARGET_TV);
     GX2CopyColorBufferToScanBuffer(present, GX2_SCAN_TARGET_DRC);
