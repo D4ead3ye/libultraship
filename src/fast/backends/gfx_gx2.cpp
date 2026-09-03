@@ -125,6 +125,23 @@ static struct GX2TextureObj* current_textures[SHADER_MAX_TEXTURES];
 // SelectTextureFb hands GX2 the framebuffer's own texture object directly. Track
 // it separately so that a LoadShader arriving after SelectTextureFb rebinds the
 // framebuffer rather than clobbering sampler 0 with the last ordinary texture.
+// [port] MSAA on the main framebuffer only. Latte shades once per pixel and
+// multi-samples coverage, so this costs bandwidth rather than shading - much
+// cheaper than raising the internal resolution, which was measured at ~22fps at
+// 1080p and rejected. MEM1 has 26 MB free after the framebuffers; 2x needs about
+// 7 MB plus an aux buffer and fits, 4x needs ~28 MB and does not.
+//
+// An AA colour buffer cannot be sampled as a texture or handed to the scan
+// buffer directly - both need a resolve first - so a plain 1x surface sits
+// beside it and everything downstream reads that.
+static uint32_t sMsaaSamples = 0;          // 0 = off, else 2
+static GX2Surface sResolveSurface = {};
+static bool sResolveValid = false;
+
+static GX2AAMode gfx_gx2_aa_mode() {
+    return sMsaaSamples >= 2 ? GX2_AA_MODE2X : GX2_AA_MODE1X;
+}
+
 static GX2Texture* current_fb_texture = nullptr;
 static GX2Sampler* current_fb_sampler = nullptr;
 static uint32_t sTexLive = 0;   // GX2 textures allocated and not yet freed
@@ -193,6 +210,60 @@ int GfxRenderingAPIGX2::GetMaxTextureSize() {
     return 8192;
 }
 
+// The aux buffer holds the extra samples; without it an AA colour buffer draws
+// nothing. Sized by GX2 itself, since the layout is not ours to guess.
+static bool gfx_gx2_alloc_aa_aux(GX2ColorBuffer* cb) {
+    cb->aaBuffer = nullptr;
+    cb->aaSize = 0;
+    if (cb->surface.aa == GX2_AA_MODE1X) {
+        return true;
+    }
+    uint32_t size = 0, align = 0;
+    GX2CalcColorBufferAuxInfo(cb, &size, &align);
+    if (size == 0) {
+        return true;
+    }
+    cb->aaBuffer = gfx_wiiu_alloc_mem1(size, align);
+    if (cb->aaBuffer == nullptr) {
+        WHBLogPrintf("[gfx_gx2] !! MSAA aux alloc failed (%u bytes) - falling back to 1x", (unsigned)size);
+        return false;
+    }
+    cb->aaSize = size;
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, cb->aaBuffer, size);
+    WHBLogPrintf("[gfx_gx2] MSAA aux %u bytes, mem1free=%u", (unsigned)size, (unsigned)gfx_wiiu_mem1_free());
+    return true;
+}
+
+// A 1x surface the AA buffer resolves into, because neither the scan buffer nor
+// a texture unit can read multi-sampled data.
+static bool gfx_gx2_alloc_resolve(uint32_t width, uint32_t height) {
+    sResolveValid = false;
+    if (sMsaaSamples < 2) {
+        return true;
+    }
+    memset(&sResolveSurface, 0, sizeof(sResolveSurface));
+    sResolveSurface.use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
+    sResolveSurface.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    sResolveSurface.width = width;
+    sResolveSurface.height = height;
+    sResolveSurface.depth = 1;
+    sResolveSurface.mipLevels = 1;
+    sResolveSurface.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+    sResolveSurface.aa = GX2_AA_MODE1X;
+    sResolveSurface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    GX2CalcSurfaceSizeAndAlignment(&sResolveSurface);
+    sResolveSurface.image = gfx_wiiu_alloc_mem1(sResolveSurface.imageSize, sResolveSurface.alignment);
+    if (sResolveSurface.image == nullptr) {
+        WHBLogPrintf("[gfx_gx2] !! MSAA resolve surface alloc failed (%u bytes)",
+                     (unsigned)sResolveSurface.imageSize);
+        return false;
+    }
+    sResolveValid = true;
+    WHBLogPrintf("[gfx_gx2] MSAA resolve surface %u bytes, mem1free=%u",
+                 (unsigned)sResolveSurface.imageSize, (unsigned)gfx_wiiu_mem1_free());
+    return true;
+}
+
 static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width, uint32_t height) {
     memset(&buffer->color_buffer, 0, sizeof(GX2ColorBuffer));
     buffer->color_buffer.surface.use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
@@ -202,7 +273,10 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
     buffer->color_buffer.surface.depth = 1;
     buffer->color_buffer.surface.mipLevels = 1;
     buffer->color_buffer.surface.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
-    buffer->color_buffer.surface.aa = GX2_AA_MODE1X;
+    // Only framebuffer 0 is multi-sampled: the others are the pause-screen
+    // captures, which are read back as textures and would need their own
+    // resolve for no visible gain.
+    buffer->color_buffer.surface.aa = (buffer == &framebuffers[0]) ? gfx_gx2_aa_mode() : GX2_AA_MODE1X;
     buffer->color_buffer.surface.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
     buffer->color_buffer.viewNumSlices = 1;
 
@@ -214,7 +288,7 @@ static void gfx_gx2_init_framebuffer(struct Framebuffer* buffer, uint32_t width,
     buffer->depth_buffer.surface.depth = 1;
     buffer->depth_buffer.surface.mipLevels = 1;
     buffer->depth_buffer.surface.format = GX2_SURFACE_FORMAT_FLOAT_R32;
-    buffer->depth_buffer.surface.aa = GX2_AA_MODE1X;
+    buffer->depth_buffer.surface.aa = (buffer == &framebuffers[0]) ? gfx_gx2_aa_mode() : GX2_AA_MODE1X;
     buffer->depth_buffer.surface.tileMode = GX2_TILE_MODE_DEFAULT;
     buffer->depth_buffer.viewNumSlices = 1;
     buffer->depth_buffer.depthClear = 1.0f;
@@ -826,6 +900,15 @@ void GfxRenderingAPIGX2::Init(void) {
     used_framebuffers = 1;
     Framebuffer& main_framebuffer = framebuffers[0];
 
+    // Read once at init: the surfaces are built here and changing samples later
+    // would mean rebuilding all of MEM1, so the menu toggle takes effect on the
+    // next launch and says so.
+    sMsaaSamples = (uint32_t)CVarGetInteger(CVAR_PREFIX_SETTING ".Graphics.MSAA", 0);
+    if (sMsaaSamples != 0 && sMsaaSamples != 2) {
+        sMsaaSamples = 2;   // only 2x fits MEM1 at 720p
+    }
+    WHBLogPrintf("[gfx_gx2] MSAA %ux", (unsigned)(sMsaaSamples ? sMsaaSamples : 1));
+
     WHBLogPrintf("[gfx_gx2] -> main framebuffer");
     gfx_gx2_init_framebuffer(&main_framebuffer, WIIU_DEFAULT_FB_WIDTH, WIIU_DEFAULT_FB_HEIGHT);
 
@@ -838,6 +921,20 @@ void GfxRenderingAPIGX2::Init(void) {
                                                                       main_framebuffer.color_buffer.surface.alignment);
     WHBLogPrintf("[gfx_gx2] color image=%p", main_framebuffer.color_buffer.surface.image);
     assert(main_framebuffer.color_buffer.surface.image);
+
+    // If either MSAA allocation fails, fall back rather than render nothing.
+    if (sMsaaSamples >= 2) {
+        if (!gfx_gx2_alloc_aa_aux(&main_framebuffer.color_buffer) ||
+            !gfx_gx2_alloc_resolve(WIIU_DEFAULT_FB_WIDTH, WIIU_DEFAULT_FB_HEIGHT)) {
+            sMsaaSamples = 0;
+            main_framebuffer.color_buffer.surface.aa = GX2_AA_MODE1X;
+            main_framebuffer.depth_buffer.surface.aa = GX2_AA_MODE1X;
+            main_framebuffer.color_buffer.aaBuffer = nullptr;
+            main_framebuffer.color_buffer.aaSize = 0;
+            GX2CalcSurfaceSizeAndAlignment(&main_framebuffer.color_buffer.surface);
+            GX2InitColorBufferRegs(&main_framebuffer.color_buffer);
+        }
+    }
 
     GX2CalcSurfaceSizeAndAlignment(&main_framebuffer.depth_buffer.surface);
     GX2InitDepthBufferRegs(&main_framebuffer.depth_buffer);
@@ -994,8 +1091,21 @@ void GfxRenderingAPIGX2::EndFrame(void) {
 
     Framebuffer& main_framebuffer = framebuffers[0];
 
-    GX2CopyColorBufferToScanBuffer(&main_framebuffer.color_buffer, GX2_SCAN_TARGET_TV);
-    GX2CopyColorBufferToScanBuffer(&main_framebuffer.color_buffer, GX2_SCAN_TARGET_DRC);
+    // Multi-sampled data cannot go straight to a scan buffer: resolve it down
+    // first and present that instead.
+    const GX2ColorBuffer* present = &main_framebuffer.color_buffer;
+    GX2ColorBuffer resolved;
+    if (sMsaaSamples >= 2 && sResolveValid) {
+        GX2ResolveAAColorBuffer(&main_framebuffer.color_buffer, &sResolveSurface, 0, 0);
+        resolved = main_framebuffer.color_buffer;
+        resolved.surface = sResolveSurface;
+        resolved.aaBuffer = nullptr;
+        resolved.aaSize = 0;
+        GX2InitColorBufferRegs(&resolved);
+        present = &resolved;
+    }
+    GX2CopyColorBufferToScanBuffer(present, GX2_SCAN_TARGET_TV);
+    GX2CopyColorBufferToScanBuffer(present, GX2_SCAN_TARGET_DRC);
 }
 
 void GfxRenderingAPIGX2::FinishRender(void) {
