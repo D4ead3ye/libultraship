@@ -21,7 +21,12 @@ namespace WiiU {
 static bool updateControllers;
 static std::map<int, SDL_GameController*> controllers;
 
+// A real GamePad at player 0. This is specifically about the touch screen, which
+// only it has - it is not "there is a pad", and must not be used to decide
+// whether vpadStatus is worth reading.
 static bool hasVpad = false;
+// vpadStatus holds buttons synthesised from some pad, GamePad or not.
+static bool hasPadState = false;
 static VPADReadError vpadError;
 static VPADStatus vpadStatus;
 
@@ -244,10 +249,12 @@ void Update() {
         uint32_t hold = 0;
         float leftX = 0.0f, leftY = 0.0f, rightX = 0.0f, rightY = 0.0f;
 
+        hasPadState = false;
         for (auto& [index, controller] : controllers) {
             if (controller == nullptr) {
                 continue;
             }
+            hasPadState = true;
             for (const auto& entry : kButtonMap) {
                 if (SDL_GameControllerGetButton(controller, entry.sdl) != 0) {
                     hold |= entry.vpad;
@@ -325,7 +332,13 @@ void Update() {
 
 VPADStatus* GetVPADStatus(VPADReadError* error) {
     *error = vpadError;
-    return hasVpad ? &vpadStatus : nullptr;
+    // Gated on hasVpad this returned null whenever the only pad was a Pro
+    // Controller, because SDL gives that player index 1 and hasVpad means
+    // "a GamePad holds index 0". ImGui then saw no buttons from any source -
+    // its Wiimote/Classic/Pro paths read KPAD, which nothing fills - so the
+    // menu could not be opened at all. The state is just as valid when it was
+    // synthesised from another pad.
+    return (hasVpad || hasPadState) ? &vpadStatus : nullptr;
 }
 
 KPADStatus* GetKPADStatus(WPADChan chan, KPADError* error) {
