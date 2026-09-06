@@ -91,31 +91,6 @@ void ThrowInvalidOTR() {
     OSFatal("Invalid OTR files! Try regenerating them!");
 }
 
-static void UpdateVPADButton(VPADStatus* status, SDL_GameController* controller, VPADButtons button, SDL_GameControllerButton sdl_button)
-{
-    if (SDL_GameControllerGetButton(controller, sdl_button) != 0) {
-        // Set the trigger bit if it wasn't held before
-        if (!(status->hold & button)) {
-            status->trigger |= button;
-        } else {
-            status->trigger &= ~button;
-        }
-
-        status->hold |= button;
-        status->release &= ~button;
-    } else {
-        // Set the release bit if it was held before
-        if (status->hold & button) {
-            status->release |= button;
-        } else {
-            status->release &= ~button;
-        }
-
-        status->hold &= ~button;
-        status->trigger &= ~button;
-    }
-}
-
 static void UpdateKPADProButton(KPADStatus* status, SDL_GameController* controller, WPADProButton button, SDL_GameControllerButton sdl_button)
 {
     if (SDL_GameControllerGetButton(controller, sdl_button) != 0) {
@@ -232,29 +207,72 @@ void Update() {
     // enhancements menu could not be opened on console at all. Synthesising from
     // SDL is safe; the warning above is about calling VPADRead a second time,
     // which would take the sample away from SDL. Nothing here touches VPADRead.
-    for (auto& [index, controller] : controllers) {
-        if (index != 0 || controller == nullptr) {
-            continue;
+    //
+    // Every pad feeds it, not only player 0. The ImGui backend does have Wiimote,
+    // Classic and Pro paths, but they read KPAD, and nothing fills that here -
+    // hasKpad is never set, so GetKPADStatus always returns null and those button
+    // words stay zero. This synthesised VPAD is the only route to the menu, so
+    // keying it to player 0 left a Pro Controller unable to open it whenever the
+    // GamePad was also on and holding that index.
+    {
+        static const struct {
+            VPADButtons vpad;
+            SDL_GameControllerButton sdl;
+        } kButtonMap[] = {
+            { VPAD_BUTTON_A, SDL_CONTROLLER_BUTTON_A },
+            { VPAD_BUTTON_B, SDL_CONTROLLER_BUTTON_B },
+            { VPAD_BUTTON_X, SDL_CONTROLLER_BUTTON_X },
+            { VPAD_BUTTON_Y, SDL_CONTROLLER_BUTTON_Y },
+            { VPAD_BUTTON_PLUS, SDL_CONTROLLER_BUTTON_START },
+            { VPAD_BUTTON_MINUS, SDL_CONTROLLER_BUTTON_BACK },
+            { VPAD_BUTTON_UP, SDL_CONTROLLER_BUTTON_DPAD_UP },
+            { VPAD_BUTTON_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN },
+            { VPAD_BUTTON_LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT },
+            { VPAD_BUTTON_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT },
+            { VPAD_BUTTON_L, SDL_CONTROLLER_BUTTON_LEFTSHOULDER },
+            { VPAD_BUTTON_R, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER },
+        };
+
+        // Whichever pad is pushed furthest wins the stick, so an idle one cannot
+        // cancel out the pad actually being used.
+        const auto furthest = [](float current, float candidate) {
+            const float a = (candidate < 0.0f) ? -candidate : candidate;
+            const float b = (current < 0.0f) ? -current : current;
+            return (a > b) ? candidate : current;
+        };
+
+        uint32_t hold = 0;
+        float leftX = 0.0f, leftY = 0.0f, rightX = 0.0f, rightY = 0.0f;
+
+        for (auto& [index, controller] : controllers) {
+            if (controller == nullptr) {
+                continue;
+            }
+            for (const auto& entry : kButtonMap) {
+                if (SDL_GameControllerGetButton(controller, entry.sdl) != 0) {
+                    hold |= entry.vpad;
+                }
+            }
+
+            // Sticks, so menu navigation works without the d-pad.
+            leftX = furthest(leftX, SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f);
+            leftY = furthest(leftY, -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f);
+            rightX = furthest(rightX, SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f);
+            rightY = furthest(rightY, -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f);
         }
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_A, SDL_CONTROLLER_BUTTON_A);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_B, SDL_CONTROLLER_BUTTON_B);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_X, SDL_CONTROLLER_BUTTON_X);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_Y, SDL_CONTROLLER_BUTTON_Y);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_PLUS, SDL_CONTROLLER_BUTTON_START);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_MINUS, SDL_CONTROLLER_BUTTON_BACK);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_UP, SDL_CONTROLLER_BUTTON_DPAD_UP);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_LEFT, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_L, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
-        UpdateVPADButton(&vpadStatus, controller, VPAD_BUTTON_R, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
 
-        // Sticks, so menu navigation works without the d-pad.
-        vpadStatus.leftStick.x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f;
-        vpadStatus.leftStick.y = -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f;
-        vpadStatus.rightStick.x = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
-        vpadStatus.rightStick.y = -SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+        // trigger and release are edges against the previous frame, so they have to
+        // be derived once from the combined state. Done per pad, an idle one would
+        // clear the bit the active one had just set.
+        const uint32_t previous = vpadStatus.hold;
+        vpadStatus.hold = hold;
+        vpadStatus.trigger = hold & ~previous;
+        vpadStatus.release = previous & ~hold;
 
+        vpadStatus.leftStick.x = leftX;
+        vpadStatus.leftStick.y = leftY;
+        vpadStatus.rightStick.x = rightX;
+        vpadStatus.rightStick.y = rightY;
     }
 
     if (hasVpad) {
