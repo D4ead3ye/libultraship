@@ -249,8 +249,12 @@ static uint32_t gfx_wiiu_proc_callback_acquired(void* context) {
     }
 
     has_foreground = true;
-    OS_SetViPaused(0);
 
+    // [port] Each step logs, because a freeze on returning from the HOME menu
+    // stopped the main loop somewhere in this callback or just after it, and the
+    // last line in the log was the MEM1 restore above. This path runs once per
+    // handover, so the cost does not matter.
+    WHBLogPrintf("[gfx_wiiu] acquire: allocating TV scan buffer");
     tv_scan_buffer = gfx_wiiu_alloc_foreground(tv_scan_buffer_size, GX2_SCAN_BUFFER_ALIGNMENT);
     assert(tv_scan_buffer);
 
@@ -258,12 +262,21 @@ static uint32_t gfx_wiiu_proc_callback_acquired(void* context) {
     GX2SetTVBuffer(tv_scan_buffer, tv_scan_buffer_size, tv_render_mode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8,
                    GX2_BUFFERING_MODE_DOUBLE);
 
+    WHBLogPrintf("[gfx_wiiu] acquire: allocating DRC scan buffer");
     drc_scan_buffer = gfx_wiiu_alloc_foreground(drc_scan_buffer_size, GX2_SCAN_BUFFER_ALIGNMENT);
     assert(drc_scan_buffer);
 
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU, drc_scan_buffer, drc_scan_buffer_size);
     GX2SetDRCBuffer(drc_scan_buffer, drc_scan_buffer_size, drc_render_mode, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8,
                     GX2_BUFFERING_MODE_DOUBLE);
+
+    // [port] Unpause last, not before the allocations above. Retraces drive the
+    // game, so unpausing first let it advance and queue GPU work in the window
+    // where the scan buffers had not been allocated or set yet. Unconfirmed as
+    // the cause of the HOME-return freeze, but wrong on its own terms: nothing
+    // should run until the surfaces it draws into exist.
+    OS_SetViPaused(0);
+    WHBLogPrintf("[gfx_wiiu] acquire: complete, VI resumed");
 
     return 0;
 }

@@ -78,6 +78,33 @@ void Init(const std::string& shortName) {
 
     // We construct or input based on SDL
     SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+
+    // [port] SDL's Wii U driver enumerates a Classic Controller and maps its
+    // buttons, but SDL ships built-in mappings for only the GamePad and the Pro
+    // Controller. Without one for the Classic, SDL_IsGameController is false for
+    // it, the control deck never opens it, and nothing reaches the game.
+    //
+    // The GUID is what SDL_CreateJoystickGUIDForName produces: bus and CRC zero,
+    // then the first eleven characters of the name plus a NUL. Deriving it that
+    // way reproduces SDL's own GamePad and Pro GUIDs exactly.
+    //
+    // The layout comes from the driver's classic_button_map, which is the pro
+    // map with the two stick-click entries zeroed and every other index left in
+    // place - so this is SDL's published Pro mapping without leftstick and
+    // rightstick. The Classic Controller has no stick clicks.
+    //
+    // Untested: no Classic Controller was available. If it misbehaves, the
+    // startup [input] lines report the name and whether SDL accepted it.
+    if (SDL_GameControllerAddMapping(
+            "0000000057696920436c617373696300,Wii Classic Controller,"
+            "a:b0,b:b1,x:b2,y:b3,"
+            "leftshoulder:b6,rightshoulder:b7,lefttrigger:b8,righttrigger:b9,"
+            "start:b10,back:b11,"
+            "dpleft:b12,dpup:b13,dpright:b14,dpdown:b15,"
+            "leftx:a0,lefty:a1,rightx:a2,righty:a3") < 0) {
+        WHBLogPrintf("[input] Classic Controller mapping rejected: %s", SDL_GetError());
+    }
+
     updateControllers = true;
 }
 
@@ -189,6 +216,12 @@ void Update() {
                      (int)hasVpad);
         for (int i = 0; i < numJoysticks; i++) {
             const char* jname = SDL_JoystickNameForIndex(i);
+            // The GUID identifies the pad to SDL's mapping database, so a pad
+            // that arrives without a mapping can be given one from this line
+            // alone - no hardware needed at this end.
+            char guid[33] = { 0 };
+            SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
+            WHBLogPrintf("[input]   %d: guid=%s", i, guid);
             if (SDL_IsGameController(i)) {
                 SDL_GameController* c = SDL_GameControllerFromInstanceID(
                     SDL_JoystickGetDeviceInstanceID(i));
