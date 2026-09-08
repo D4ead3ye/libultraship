@@ -410,20 +410,22 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
             OS_RequestThreadExit();
             WHBLogPrintf("[gfx_wiiu] exit: cadence stopped, threads asked to unwind");
 
-            // Do the work that must not be lost here rather than trusting the
-            // pump to return. It does not always, and when it does not the
-            // backstop below kills the process with settings unsaved.
-            port_flushSettingsForExit();
-            ThreadWatchdog_Breadcrumb("EXIT-CB-done");
-
-            // Backstop only. With the queue waits now breaking on the exit
-            // request this should never fire; if it does, the log says so and
-            // the shutdown path still needs work.
+            // Arm the backstop before anything that can block, never after.
+            // Flushing settings here first cost a console freeze: the save
+            // blocked inside this callback and the thread that would have
+            // terminated the process had not been created yet, so a six-second
+            // hang became a lockup needing the power switch.
             std::thread([] {
                 std::this_thread::sleep_for(std::chrono::seconds(6));
                 WHBLogPrintf("[gfx_wiiu] exit: STILL RUNNING after 6s, terminating - shutdown path is wrong");
                 _Exit(0);
             }).detach();
+
+            // Now the work that must not be lost. The pump does not reliably
+            // return after this callback, so waiting for the main loop to do it
+            // loses it about one close in five.
+            port_flushSettingsForExit();
+            ThreadWatchdog_Breadcrumb("EXIT-CB-done");
             return 0;
         },
         nullptr, 100);
