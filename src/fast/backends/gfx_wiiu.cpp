@@ -225,6 +225,9 @@ extern "C" void OS_RequestThreadExit(void);
 extern "C" void ThreadWatchdog_Breadcrumb(const char* note);
 // Writes the shutdown marker only, and cannot block: safe inside a callback.
 extern "C" void port_markCleanExit(void);
+// Terminates once, whoever calls first. _Exit is not reentrant here: a second
+// call while one is in progress freezes the console.
+extern "C" void port_terminateOnce(void);
 
 static bool sMem1Owned = false;
 // Whether the app currently owns the foreground. Nothing may touch GX2 or MEM1
@@ -426,7 +429,7 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
             std::thread([] {
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 WHBLogPrintf("[gfx_wiiu] exit: pump did not return, terminating from the exit thread");
-                _Exit(0);
+                port_terminateOnce();
             }).detach();
 
             // Mark the ring, and nothing more. The settings save used to happen
