@@ -220,6 +220,9 @@ extern "C" void OS_SetViPaused(int paused);
 // Also defined by the port: begins an orderly shutdown and wakes anything parked
 // on a message queue so it can unwind.
 extern "C" void OS_RequestThreadExit(void);
+// Written straight to the SD card, so a lock during a handover leaves a trace
+// even though nothing over the network survives one.
+extern "C" void ThreadWatchdog_Breadcrumb(const char* note);
 
 static bool sMem1Owned = false;
 // Whether the app currently owns the foreground. Nothing may touch GX2 or MEM1
@@ -277,11 +280,13 @@ static uint32_t gfx_wiiu_proc_callback_acquired(void* context) {
     // should run until the surfaces it draws into exist.
     OS_SetViPaused(0);
     WHBLogPrintf("[gfx_wiiu] acquire: complete, VI resumed");
+    ThreadWatchdog_Breadcrumb("FOREGROUND-ACQUIRED");
 
     return 0;
 }
 
 static uint32_t gfx_wiiu_proc_callback_released(void* context) {
+    ThreadWatchdog_Breadcrumb("FOREGROUND-RELEASING");
     // Suspend the game first. Retraces kept firing across the handover while the
     // game thread could not consume them, which filled its queue (tickRetraceQ=60)
     // and deadlocked the pipeline on resume.
