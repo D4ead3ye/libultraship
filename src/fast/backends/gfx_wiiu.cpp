@@ -286,7 +286,12 @@ static uint32_t gfx_wiiu_proc_callback_acquired(void* context) {
 }
 
 static uint32_t gfx_wiiu_proc_callback_released(void* context) {
-    ThreadWatchdog_Breadcrumb("FOREGROUND-RELEASING");
+    // [port] Breadcrumbed step by step. Closing from the HOME menu locks the
+    // console here: the log stops after the MEM1 lines below and the last
+    // record written is REL-enter, so the CPU dies somewhere in this function
+    // within half a second. Each marker reaches the SD card, so one repro says
+    // which call it was.
+    ThreadWatchdog_Breadcrumb("REL-1-enter");
     // Suspend the game first. Retraces kept firing across the handover while the
     // game thread could not consume them, which filled its queue (tickRetraceQ=60)
     // and deadlocked the pipeline on resume.
@@ -295,25 +300,32 @@ static uint32_t gfx_wiiu_proc_callback_released(void* context) {
     // Stop anything drawing before the memory it draws into goes away, and let
     // the GPU finish what is already queued.
     has_foreground = false;
+    ThreadWatchdog_Breadcrumb("REL-2-predrawdone");
     GX2DrawDone();
+    ThreadWatchdog_Breadcrumb("REL-3-drawdone");
 
     if (sMem1Owned) {
         gfx_gx2_release_mem1_surfaces();
+        ThreadWatchdog_Breadcrumb("REL-4-mem1surfaces");
         gfx_wiiu_destroy_mem1();
         sMem1Owned = false;
     }
+    ThreadWatchdog_Breadcrumb("REL-5-mem1heap");
 
     if (tv_scan_buffer) {
         gfx_wiiu_free_foreground(tv_scan_buffer);
         tv_scan_buffer = nullptr;
     }
+    ThreadWatchdog_Breadcrumb("REL-6-tvbuf");
 
     if (drc_scan_buffer) {
         gfx_wiiu_free_foreground(drc_scan_buffer);
         drc_scan_buffer = nullptr;
     }
+    ThreadWatchdog_Breadcrumb("REL-7-drcbuf");
 
     gfx_wiiu_destroy_foreground();
+    ThreadWatchdog_Breadcrumb("REL-8-complete");
 
     return 0;
 }
