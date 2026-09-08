@@ -421,12 +421,24 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
                 _Exit(0);
             }).detach();
 
-            // Now the work that must not be lost. The pump does not reliably
-            // return after this callback, so waiting for the main loop to do it
-            // loses it about one close in five.
+            // Now the work that must not be lost.
             port_flushSettingsForExit();
             ThreadWatchdog_Breadcrumb("EXIT-CB-done");
-            return 0;
+
+            // Terminate here rather than returning into ProcUI's own shutdown.
+            //
+            // Returning hands control back to ProcUIProcessMessages, and that
+            // call does not reliably come back once the exit message has been
+            // dispatched: about one close in five the main loop never ran
+            // again, never reached its exit path, and only the backstop above
+            // ended the process. Nothing after this point is needed - the
+            // teardown below _Exit is deliberately skipped anyway, because
+            // every graceful version of it froze the console, and the OS
+            // reclaims the lot on process exit.
+            //
+            // This is the same _Exit the backstop performs, six seconds sooner.
+            WHBLogPrintf("[gfx_wiiu] exit: flushed, terminating from the exit callback");
+            _Exit(0);
         },
         nullptr, 100);
     ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, gfx_wiiu_proc_callback_acquired, nullptr, 100);
