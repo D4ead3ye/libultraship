@@ -410,14 +410,22 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
             OS_RequestThreadExit();
             WHBLogPrintf("[gfx_wiiu] exit: cadence stopped, threads asked to unwind");
 
-            // Arm the backstop before anything that can block, never after.
-            // Flushing settings here first cost a console freeze: the save
-            // blocked inside this callback and the thread that would have
-            // terminated the process had not been created yet, so a six-second
-            // hang became a lockup needing the power switch.
+            // Terminate from a thread, never from inside this callback, and arm
+            // it before anything that can block.
+            //
+            // Calling _Exit here directly froze the console: ProcUI is still
+            // dispatching, holding its own locks, and the exit wedges - the log
+            // showed _Exit reached, then the process alive seventy-five seconds
+            // later with the watchdog still printing, and a second _Exit from
+            // this thread unable to finish either. From a separate thread it has
+            // always worked, returning to the system menu within a few seconds.
+            //
+            // Two seconds, not six: the flush below has already happened by the
+            // time this fires, so there is nothing left worth waiting for. If
+            // the ordinary path gets there first it wins and this never runs.
             std::thread([] {
-                std::this_thread::sleep_for(std::chrono::seconds(6));
-                WHBLogPrintf("[gfx_wiiu] exit: STILL RUNNING after 6s, terminating - shutdown path is wrong");
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+                WHBLogPrintf("[gfx_wiiu] exit: pump did not return, terminating from the exit thread");
                 _Exit(0);
             }).detach();
 
@@ -425,20 +433,10 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
             port_flushSettingsForExit();
             ThreadWatchdog_Breadcrumb("EXIT-CB-done");
 
-            // Terminate here rather than returning into ProcUI's own shutdown.
-            //
-            // Returning hands control back to ProcUIProcessMessages, and that
-            // call does not reliably come back once the exit message has been
-            // dispatched: about one close in five the main loop never ran
-            // again, never reached its exit path, and only the backstop above
-            // ended the process. Nothing after this point is needed - the
-            // teardown below _Exit is deliberately skipped anyway, because
-            // every graceful version of it froze the console, and the OS
-            // reclaims the lot on process exit.
-            //
-            // This is the same _Exit the backstop performs, six seconds sooner.
-            WHBLogPrintf("[gfx_wiiu] exit: flushed, terminating from the exit callback");
-            _Exit(0);
+            // Return, and let the thread above end the process. Everything that
+            // had to survive the close is already on disk.
+            WHBLogPrintf("[gfx_wiiu] exit: flushed, waiting for shutdown");
+            return 0;
         },
         nullptr, 100);
     ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, gfx_wiiu_proc_callback_acquired, nullptr, 100);
