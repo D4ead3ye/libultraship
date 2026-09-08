@@ -696,7 +696,38 @@ bool GfxWindowBackendWiiU::CanDisableVsync() {
 }
 
 bool GfxWindowBackendWiiU::IsRunning(void) {
-    return WHBProcIsRunning();
+    // [port] Poll ProcUI instead of blocking in it.
+    //
+    // WHBProcIsRunning calls ProcUIProcessMessages(TRUE), and that call does not
+    // reliably come back. On a close it left the main loop parked until the exit
+    // thread ended the process; on a resume from the HOME menu it never returned
+    // at all - the acquire callback ran to completion, "VI resumed" was logged,
+    // and the loop still never reported again, with the watchdog naming this
+    // exact phase for eighty-six seconds while the game sat dead.
+    //
+    // The state machine below is what that helper does, minus the blocking, so
+    // the loop always gets control back and a missed wakeup costs one iteration
+    // rather than the session. ProcUI suspends these threads itself while the
+    // app is in the background, so polling does not spin there; the sleep is
+    // only for the moments it lets us run.
+    static bool sShutdownDone = false;
+    switch (ProcUIProcessMessages(FALSE)) {
+        case PROCUI_STATUS_EXITING:
+            if (!sShutdownDone) {
+                sShutdownDone = true;
+                ProcUIShutdown();
+            }
+            return false;
+        case PROCUI_STATUS_RELEASE_FOREGROUND:
+            ProcUIDrawDoneRelease();
+            return true;
+        case PROCUI_STATUS_IN_BACKGROUND:
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            return true;
+        case PROCUI_STATUS_IN_FOREGROUND:
+        default:
+            return true;
+    }
 }
 
 void GfxWindowBackendWiiU::Destroy(void) {
