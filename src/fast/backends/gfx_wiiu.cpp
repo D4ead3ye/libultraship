@@ -223,8 +223,8 @@ extern "C" void OS_RequestThreadExit(void);
 // Written straight to the SD card, so a lock during a handover leaves a trace
 // even though nothing over the network survives one.
 extern "C" void ThreadWatchdog_Breadcrumb(const char* note);
-// Flushes settings and writes the shutdown marker; safe to call more than once.
-extern "C" void port_flushSettingsForExit(void);
+// Writes the shutdown marker only, and cannot block: safe inside a callback.
+extern "C" void port_markCleanExit(void);
 
 static bool sMem1Owned = false;
 // Whether the app currently owns the foreground. Nothing may touch GX2 or MEM1
@@ -429,8 +429,16 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
                 _Exit(0);
             }).detach();
 
-            // Now the work that must not be lost.
-            port_flushSettingsForExit();
+            // Mark the ring, and nothing more. The settings save used to happen
+            // here too and it is the one call left that can block: any write to
+            // the card can stall while the foreground is being handed over, and
+            // when it did, this callback never returned - the log shows "cadence
+            // stopped" with no "settings flushed" after it, and the console gone
+            // until the thread above fired. The marker write gives up after
+            // 250ms rather than wait, so it is safe here; the save is not, and
+            // now happens only on the main loop's own exit path, outside any
+            // ProcUI callback.
+            port_markCleanExit();
             ThreadWatchdog_Breadcrumb("EXIT-CB-done");
 
             // Return, and let the thread above end the process. Everything that
