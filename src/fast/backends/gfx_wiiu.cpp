@@ -223,6 +223,8 @@ extern "C" void OS_RequestThreadExit(void);
 // Written straight to the SD card, so a lock during a handover leaves a trace
 // even though nothing over the network survives one.
 extern "C" void ThreadWatchdog_Breadcrumb(const char* note);
+// Flushes settings and writes the shutdown marker; safe to call more than once.
+extern "C" void port_flushSettingsForExit(void);
 
 static bool sMem1Owned = false;
 // Whether the app currently owns the foreground. Nothing may touch GX2 or MEM1
@@ -407,6 +409,12 @@ void GfxWindowBackendWiiU::Init(const char* game_name, const char* gfx_api_name,
             OS_SetViPaused(1);
             OS_RequestThreadExit();
             WHBLogPrintf("[gfx_wiiu] exit: cadence stopped, threads asked to unwind");
+
+            // Do the work that must not be lost here rather than trusting the
+            // pump to return. It does not always, and when it does not the
+            // backstop below kills the process with settings unsaved.
+            port_flushSettingsForExit();
+            ThreadWatchdog_Breadcrumb("EXIT-CB-done");
 
             // Backstop only. With the queue waits now breaking on the exit
             // request this should never fire; if it does, the log says so and
